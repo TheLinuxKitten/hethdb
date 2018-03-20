@@ -1,5 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -Wmissing-signatures #-}
 
 --------------------------------------------------------------------------
 --
@@ -33,7 +34,8 @@ import Network.Web3.Dapp.EthABI (keccak256)
 import Network.Web3.Dapp.Int
 import System.Environment (getArgs,getProgName)
 import System.IO (BufferMode(..),hPutStrLn,hSetBuffering,stderr,stdout)
-import qualified System.IO.Streams.Internal as IOS
+import qualified System.IO.Streams as IOS
+import System.Posix.Signals
 
 getOps :: IO (String,BlockNum,BlockNum,Bool,Bool)
 getOps = do
@@ -63,6 +65,15 @@ putStrLnErr = hPutStrLn stderr
 printErr :: (Show a) => a -> IO ()
 printErr = hPutStrLn stderr . show
 
+data MysqlTx =
+    MyBlock BlockNum HexHash256 HexEthAddr Integer Gas
+  | MyTx BlockNum Int HexHash256 Integer Gas Bool Word64
+  | MyContractCreation BlockNum Int HexEthAddr HexEthAddr
+  | MyMsgCall BlockNum Int HexEthAddr HexEthAddr
+  | MyInternalTx BlockNum Int Word32 HexEthAddr HexEthAddr Word8
+  | MyTouchedAccount BlockNum Int HexEthAddr
+  deriving (Eq,Show)
+
 mySetBlkNum = MySQLInt32U
 mySetTxIdx = MySQLInt16U . fromIntegral
 mySetIdx = MySQLInt32U
@@ -87,6 +98,9 @@ myGetNum myVal = case myVal of
   MySQLInt64U v -> fromIntegral v
   MySQLInt64 v -> fromIntegral v
   _ -> error (show myVal)
+
+myReadAndSkipToEof :: IOS.InputStream a -> IO (Maybe a)
+myReadAndSkipToEof s = IOS.read s <* skipToEof s
 
 createTableGenesisQ = "create table genesis (addr binary(20) not null, balance binary(32) not null, primary key (addr));"
 insertGenesisQ = "insert into genesis (addr,balance) value (?,?);"
@@ -139,13 +153,18 @@ insertMsgCallP blkNum txIdx fromA toA =
 insertMsgCall myCon blkNum txIdx fromA toA = do
   print ("call", blkNum, txIdx, fromA, toA)
   execute myCon insertMsgCallQ (insertMsgCallP blkNum txIdx fromA toA) >>= printErr
+selectMsgCallHasFromQ = "select * from msgCalls where fromA = ? limit 1;"
+selectMsgCallHasFromP addr = [mySetAddr addr]
+selectMsgCallHasFrom myCon addr = do
+  (colDefs,isValues) <- query myCon selectMsgCallHasFromQ
+                                      (selectMsgCallHasFromP addr)
+  not . null . fromJust <$> myReadAndSkipToEof isValues
 selectMsgCallCountFromQ = "select count(*) from msgCalls where fromA = ?;"
 selectMsgCallCountFromP addr = [mySetAddr addr]
 selectMsgCallCountFrom myCon addr = do
   (colDefs,isValues) <- query myCon selectMsgCallCountFromQ
                                       (selectMsgCallCountFromP addr)
-  myGetNum . head . fromJust
-    <$> (IOS.read isValues <* skipToEof isValues)
+  myGetNum . head . fromJust <$> myReadAndSkipToEof isValues
 
 createTableContractCreationsQ = "create table contractCreations (blkNum integer unsigned not null, txIdx smallint unsigned not null, fromA binary(20) not null, contractA binary(20) not null, primary key (blkNum,txIdx));"
 createIndexContractCreationFromQ = "create index contractCreationFrom on contractCreations (fromA);"
@@ -160,12 +179,18 @@ insertContractCreationP blkNum txIdx fromA contractA =
 insertContractCreation myCon blkNum txIdx fromA contractA = do
   print ("new", blkNum, txIdx, fromA, contractA)
   execute myCon insertContractCreationQ (insertContractCreationP blkNum txIdx fromA contractA) >>= printErr
-selectContractCreationCountAddrQ = "select count(*) from contractCreations where fromA = ? or contractA = ?;"
-selectContractCreationCountAddrP addr = [mySetAddr addr, mySetAddr addr]
-selectContractCreationCountAddr myCon addr = do
-  (colDefs,isValues) <- query myCon selectContractCreationCountAddrQ
-                                (selectContractCreationCountAddrP addr)
-  myGetNum . head . fromJust <$> (IOS.read isValues <* skipToEof isValues)
+selectContractCreationHasFromQ = "select * from contractCreations where fromA = ? limit 1;"
+selectContractCreationHasFromP addr = [mySetAddr addr]
+selectContractCreationHasFrom myCon addr = do
+  (colDefs,isValues) <- query myCon selectContractCreationHasFromQ
+                                (selectContractCreationHasFromP addr)
+  not . null . fromJust <$> myReadAndSkipToEof isValues
+selectContractCreationCountFromQ = "select count(*) from contractCreations where fromA = ?;"
+selectContractCreationCountFromP addr = [mySetAddr addr]
+selectContractCreationCountFrom myCon addr = do
+  (colDefs,isValues) <- query myCon selectContractCreationCountFromQ
+                                (selectContractCreationCountFromP addr)
+  myGetNum . head . fromJust <$> myReadAndSkipToEof isValues
 
 createTableInternalTxsQ = "create table internalTxs (blkNum integer unsigned not null, txIdx smallint unsigned not null, idx mediumint unsigned not null, fromA binary(20) not null, addr binary(20) not null, opcode tinyint unsigned not null, primary key (blkNum,txIdx,idx));"
 createIndexInternalTxFromQ = "create index internalTxFrom on internalTxs (fromA);"
@@ -195,7 +220,7 @@ selectInternalTxCountAddrP addr =
 selectInternalTxCountAddr myCon addr = do
   (colDefs,isValues) <- query myCon selectInternalTxCountAddrQ
                                 (selectInternalTxCountAddrP addr)
-  myGetNum . head . fromJust <$> (IOS.read isValues <* skipToEof isValues)
+  myGetNum . head . fromJust <$> myReadAndSkipToEof isValues
 
 
 createDeadAccountsQ = "create table deadAccounts (blkNum integer unsigned not null, txIdx smallint unsigned not null, addr binary(20) not null, primary key (addr));"
@@ -214,7 +239,7 @@ selectDeadAccountAddrP addr = [mySetAddr addr]
 selectDeadAccountAddr myCon addr = do
   (colDefs,isValues) <- query myCon selectDeadAccountAddrQ
                                       (selectDeadAccountAddrP addr)
-  mVals <- IOS.read isValues <* skipToEof isValues
+  mVals <- myReadAndSkipToEof isValues
   return ((\vals -> if null vals then Nothing else Just (head vals)) <$> mVals)
 
 createLastBlkQ = "create table lastBlk (blkNum integer unsigned not null, primary key (blkNum));"
@@ -222,8 +247,7 @@ insertLastBlkQ = "insert into lastBlk (blkNum) value (?);"
 lastBlkP blkNum = [mySetBlkNum blkNum]
 selectLastBlkQ = "select blkNum from lastBlk order by blkNum desc limit 1;"
 readLastBlk isValues = do
-  myGetNum . head . fromJust
-    <$> (IOS.read isValues <* skipToEof isValues)
+  myGetNum . head . fromJust <$> myReadAndSkipToEof isValues
 
 runWeb3 doLog url f = runStderrLoggingT
                     $ filterLoggerLogLevel
@@ -402,50 +426,87 @@ dbInsertBlocks blk numBlks url myCon = do
   mapM_ (dbInsertBlock url myCon) blks
   --dbInsertLastBlk myCon (last blks)
 
+ignoreCtrlC :: IO a -> IO a
+ignoreCtrlC f = do
+  oldH <- installHandler keyboardSignal Ignore Nothing
+  printErr "Ignorar Ctrl+C"
+  r <- f
+  printErr "Restaurar Ctrl+C"
+  installHandler keyboardSignal oldH Nothing
+  return r
+
 dbInsertBlock :: String -> MySQLConn -> BlockNum -> IO ()
 dbInsertBlock url myCon blkNum = do
   blk <- fromJust . fromRight
       <$> runWeb3 False url (eth_getBlockByNumber (RPBNum blkNum) True)
-  insertBlock myCon blkNum (fromJust $ rebHash blk) (fromJust $ rebMiner blk) (rebDifficulty blk) (rebGasLimit blk)
-  mapM_ (dbInsertTx url myCon . (\(POObject tx) -> tx)) (getTxs blk)
+  let mtx = MyBlock blkNum (fromJust $ rebHash blk)
+                    (fromJust $ rebMiner blk) (rebDifficulty blk)
+                    (rebGasLimit blk)
+  myDbTxs <- mapM (dbInsertTx url . (\(POObject tx) -> tx)) (getTxs blk)
+  ignoreCtrlC $ do
+    dbInsertMyTx myCon mtx
+    mapM_ (dbInsertMyTxs url myCon) myDbTxs
+
+dbInsertMyTxs url myCon (mtxs,mdas) = do
+  mapM_ (dbInsertMyTx myCon) mtxs
+  mapM_ (dbInsertMyTouchedAccount url myCon) mdas
+
+dbInsertMyTx myCon mtx = case mtx of
+  (MyBlock blkNum blkHash miner difficulty gasLimit) ->
+    insertBlock myCon blkNum blkHash miner difficulty gasLimit
+  (MyTx blkNum txIdx txHash value gas failed mop) ->
+    insertTx myCon blkNum txIdx txHash value gas failed mop
+  (MyContractCreation blkNum txIdx fromA contractA) ->
+    insertContractCreation myCon blkNum txIdx fromA contractA
+  (MyMsgCall blkNum txIdx fromA toA) ->
+    insertMsgCall myCon blkNum txIdx fromA toA
+  (MyInternalTx blkNum txIdx idx fromA addr opcode) ->
+    insertInternalTx myCon blkNum txIdx idx fromA addr opcode
+  _ -> error $ "dbInsertMyTx: " ++ show mtx
 
 nullAddr = (==addr0)
 
 isReservedAddr addr = any (==addr) [addr0,addr1,addr2,addr3,addr4]
 
-dbInsertTx :: String -> MySQLConn -> RpcEthBlkTx -> IO ()
-dbInsertTx url myCon (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto txValue _ txGas _ _ _ _) = do
+dbInsertTx :: String -> RpcEthBlkTx -> IO ([MysqlTx],[MysqlTx])
+dbInsertTx url (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto txValue _ txGas _ _ _ _) = do
   txTrace <- getTraceTx url txHash
   let failed = traceTxFailed txTrace
   let (mop,tls) = if failed
                     then (0,[])
-                    else
-                      let tls = traceTxLogs txTrace
-                      in (traceLogsMaskOp tls, tls)
-  insertTx myCon blkNum txIdx txHash txValue txGas failed mop
-  cAddr <- case mto of
+                    else let tls = traceTxLogs txTrace
+                         in (traceLogsMaskOp tls, tls)
+  let mtx1 = MyTx blkNum txIdx txHash txValue txGas failed mop
+  (mtx2,mdas2,cAddr) <- case mto of
     Nothing -> do
       cAddr <- fromJust . txrContractAddress . fromJust . fromRight
            <$> runWeb3 False url (eth_getTransactionReceipt txHash)
-      insertContractCreation myCon blkNum txIdx from cAddr
-      return cAddr
+      let mtx = MyContractCreation blkNum txIdx from cAddr
+      return (mtx,[],cAddr)
     Just to -> do
-      insertMsgCall myCon blkNum txIdx from to
-      dbInsertDeadAccounts url myCon blkNum txIdx [to]
-      return to
-  unless failed $ do
-    let treeTraceLogs = traceTxTree tls
-    dbInsertInternalTxs url myCon blkNum txIdx cAddr treeTraceLogs
+      let mtx = MyMsgCall blkNum txIdx from to
+      let mda = MyTouchedAccount blkNum txIdx to
+      return (mtx,[mda],to)
+  let (mtxs3,mdas3) = if not failed
+                        then dbInsertInternalTxs
+                                  blkNum txIdx cAddr $ traceTxTree tls
+                        else ([],[])
+  let mdas = nub $ if null mdas2 then mdas3 else head mdas2:mdas3
+  return (mtx1:mtx2:mtxs3,mdas)
 
-dbInsertInternalTxs :: String -> MySQLConn -> BlockNum -> Int
-                    -> HexEthAddr -> [Tree RpcTraceLog] -> IO ()
-dbInsertInternalTxs url myCon blkNum txIdx cAddr treeTraceLogs = do
+dbInsertInternalTxs :: BlockNum -> Int
+                    -> HexEthAddr -> [Tree RpcTraceLog]
+                    -> ([MysqlTx],[MysqlTx])
+dbInsertInternalTxs blkNum txIdx cAddr treeTraceLogs =
   let (rs,tchs,_,_,_) = getItxs 0 cAddr treeTraceLogs
-  let itxs = reverse $ concatMaybes rs
-  let tchs' = nub $ concatMaybes tchs
-  mapM_ dbInsertInternalTx itxs
-  dbInsertDeadAccounts url myCon blkNum txIdx tchs'
+      itxs = reverse $ concatMaybes rs
+      tchs' = nub $ concatMaybes tchs
+      mtxs = map dbInsertInternalTx itxs
+      mdas = map (MyTouchedAccount blkNum txIdx) tchs'
+  in (mtxs,mdas)
   where
+    dbInsertInternalTx (idx,from,to,opcode) =
+      MyInternalTx blkNum txIdx idx from to opcode
     getItxs idx addr forest = foldl getItx ([],[],idx,addr,forest) forest
     getItx (r,tchs,idx,addr,(_:ts)) t =
       let (RpcTraceLog _ _ _ _ _ op _ mstack _) = rootLabel t
@@ -498,8 +559,6 @@ dbInsertInternalTxs url myCon blkNum txIdx cAddr treeTraceLogs = do
           tch = if nullAddr addr then Nothing else Just addr
       in (addr,tch)
     stackAddr = HexEthAddr . joinHex . T.drop (64-40) . stripHex
-    dbInsertInternalTx (idx,from,to,opcode) =
-      insertInternalTx myCon blkNum txIdx idx from to opcode
 
 opCall = 0xf1
 opCallcode = 0xf2
@@ -566,30 +625,13 @@ opcodeNoms =
   , ["SELFDESTRUCT"]
   ]
 
-dbInsertDeadAccount :: MySQLConn -> BlockNum -> Int -> HexEthAddr -> IO ()
-dbInsertDeadAccount myCon blkNum txIdx addr = return ()
-
-dbInsertDeadAccounts :: String -> MySQLConn -> BlockNum -> Int
-                     -> [HexEthAddr] -> IO ()
-dbInsertDeadAccounts url myCon blkNum txIdx addrs =
-  filterM (isDeadAccount url myCon blkNum txIdx) addrs
-    >>= mapM_ (dbInsertDeadAccount myCon blkNum txIdx)
-  where
-    dbInsertDeadAccount myCon blkNum txIdx addr = do
-      mDeadAddr <- selectDeadAccountAddr myCon addr
-      unless (isJust mDeadAddr) $ insertDeadAccount myCon blkNum txIdx addr
-
-accountHasNonce myCon addr = do
-  n1 <- selectMsgCallCountFrom myCon addr
-  if n1 > 0
-    then return True
-    else do
-      n2 <- selectContractCreationCountAddr myCon addr
-      if n2 > 0
-        then return True
-        else do
-          n3 <- selectInternalTxCountAddr myCon addr
-          return $ n3 > 0
+dbInsertMyTouchedAccount url myCon mtx = case mtx of
+  (MyTouchedAccount blkNum txIdx addr) -> do
+    yetIs <- isJust <$> selectDeadAccountAddr myCon addr
+    unless yetIs $ do
+      isDead <- isDeadAccount url myCon blkNum txIdx addr
+      when isDead $ insertDeadAccount myCon blkNum txIdx addr
+  _ -> error $ "dbInsertMyTouchedAccount: " ++ show mtx
 
 isDeadAccount :: String -> MySQLConn
               -> BlockNum -> Int -> HexEthAddr -> IO Bool
@@ -617,6 +659,16 @@ isEmptyAccount url myCon blkNum addr = do
       if hasCode == True
         then return False
         else not <$> accountHasNonce myCon addr
+
+accountHasNonce myCon addr = do
+  hasNonce <- selectMsgCallHasFrom myCon addr
+  if hasNonce
+    then return True
+    else selectContractCreationHasFrom myCon addr
+
+accountNonce myCon addr = (+)
+                      <$> selectMsgCallCountFrom myCon addr
+                      <*> selectContractCreationCountFrom myCon addr
 
 getTraceTx url txHash = fromRight <$> runWeb3 False url
                                         (debug_traceTransaction txHash
