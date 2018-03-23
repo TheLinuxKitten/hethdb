@@ -13,6 +13,7 @@
 
 module Main where
 
+import Control.Concurrent (threadDelay)
 import Control.Monad (filterM,unless,when)
 import Control.Monad.IO.Class
 import Data.Bits
@@ -249,10 +250,22 @@ selectLastBlkQ = "select blkNum from lastBlk order by blkNum desc limit 1;"
 readLastBlk isValues = do
   myGetNum . head . fromJust <$> myReadAndSkipToEof isValues
 
-runWeb3 doLog url f = runStderrLoggingT
-                    $ filterLoggerLogLevel
-                        (if doLog then LevelDebug else LevelOther "NoLogs")
-                    $ runWeb3HttpT 5 5 url f
+runWeb3 doLog url f = runWeb3N 1
+  where
+    runWeb3N n = do
+      er <- runWeb3'
+      case er of
+        Left e -> do
+          if n > 10
+            then return er
+            else do
+              threadDelay (5*10^6)
+              runWeb3N (n+1)
+        Right r -> return er
+    runWeb3' = runStderrLoggingT
+             $ filterLoggerLogLevel
+                   (if doLog then LevelDebug else LevelOther "NoLogs")
+             $ runWeb3HttpT 15 15 url f
 
 main :: IO ()
 main = do
@@ -285,7 +298,7 @@ tests doLog url iniBlk numBlks = do
   hSetBuffering stderr NoBuffering
   let blks = map (iniBlk+) [0 .. numBlks-1]
   mapM_ (\blkNum -> do
-    blk <- fromJust . fromRight
+    blk <- fromJust . fromRight "eth_getBlockByNumber"
        <$> runWeb3 doLog url (eth_getBlockByNumber (RPBNum blkNum) True)
     let txs = getTxs blk
     mapM_ (\(POObject tx) -> do
@@ -374,7 +387,8 @@ initDb url myCon = do
   dbInsertBlock0 url myCon
   dbInsertLastBlk myCon 0
 
-fromRight (Right r) = r
+fromRight _ (Right r) = r
+fromRight t (Left e) = error $ show t ++ ": " ++ show e
 
 addrN :: (Integral n) => n -> HexEthAddr
 addrN = HexEthAddr . toHex . bytesN
@@ -414,7 +428,7 @@ ethProto (EthProtoCfg homestead daofork tangerine spurious byzantium) blkNum =
 
 dbInsertBlock0 :: String -> MySQLConn -> IO ()
 dbInsertBlock0 url myCon = do
-  accs <- stateAccounts . fromRight
+  accs <- stateAccounts . fromRight "debug_dumpBlock"
       <$> runWeb3 False url (debug_dumpBlock 0)
   mapM_ (\acc -> insertGenesis myCon (accAddr acc) (accBalance acc)) accs
 
@@ -437,13 +451,13 @@ ignoreCtrlC f = do
 
 dbInsertBlock :: String -> MySQLConn -> BlockNum -> IO ()
 dbInsertBlock url myCon blkNum = do
-  blk <- fromJust . fromRight
+  blk <- fromJust . fromRight "eth_getBlockByNumber"
       <$> runWeb3 False url (eth_getBlockByNumber (RPBNum blkNum) True)
   let mtx = MyBlock blkNum (fromJust $ rebHash blk)
                     (fromJust $ rebMiner blk) (rebDifficulty blk)
                     (rebGasLimit blk)
   myDbTxs <- mapM (dbInsertTx url . (\(POObject tx) -> tx)) (getTxs blk)
-  ignoreCtrlC $ do
+  ignoreCtrlC $ withTransaction $ do
     dbInsertMyTx myCon mtx
     mapM_ (dbInsertMyTxs url myCon) myDbTxs
 
@@ -479,7 +493,8 @@ dbInsertTx url (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto txVal
   let mtx1 = MyTx blkNum txIdx txHash txValue txGas failed mop
   (mtx2,mdas2,cAddr) <- case mto of
     Nothing -> do
-      cAddr <- fromJust . txrContractAddress . fromJust . fromRight
+      cAddr <- fromJust . txrContractAddress . fromJust
+             . fromRight "eth_getTransactionReceipt"
            <$> runWeb3 False url (eth_getTransactionReceipt txHash)
       let mtx = MyContractCreation blkNum txIdx from cAddr
       return (mtx,[],cAddr)
@@ -649,12 +664,12 @@ isDeadAccount url myCon blkNum txIdx addr = do
 isEmptyAccount :: String -> MySQLConn
                -> BlockNum -> HexEthAddr -> IO Bool
 isEmptyAccount url myCon blkNum addr = do
-  balance <- maybe 0 id . fromRight
+  balance <- maybe 0 id . fromRight "eth_getBalance'"
          <$> runWeb3 False url (eth_getBalance' addr $ RPBNum blkNum)
   if balance /= 0
     then return False
     else do
-      hasCode <- not . (==T.empty) . stripHex . fromRight
+      hasCode <- not . (=="0x") . fromRight "eth_getCode"
             <$> runWeb3 False url (eth_getCode addr $ RPBNum blkNum)
       if hasCode == True
         then return False
@@ -670,12 +685,13 @@ accountNonce myCon addr = (+)
                       <$> selectMsgCallCountFrom myCon addr
                       <*> selectContractCreationCountFrom myCon addr
 
-getTraceTx url txHash = fromRight <$> runWeb3 False url
-                                        (debug_traceTransaction txHash
-                                          (defaultTraceOptions
-                                            { traceOpDisableStorage = True
-                                            , traceOpDisableMemory = True
-                                            }))
+getTraceTx url txHash = fromRight "debug_traceTransaction"
+                    <$> runWeb3 False url
+                            (debug_traceTransaction txHash
+                                  (defaultTraceOptions
+                                      { traceOpDisableStorage = True
+                                      , traceOpDisableMemory = True
+                                      }))
 
 dbCreateTables :: MySQLConn -> IO ()
 dbCreateTables myCon = do
