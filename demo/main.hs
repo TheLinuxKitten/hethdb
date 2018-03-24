@@ -110,6 +110,24 @@ insertGenesis myCon addr balance = do
   print ("gen",addr,toHex balance)
   execute myCon insertGenesisQ (insertGenesisP addr balance) >>= printErr
 
+tableInsertMyTxs myCon tblNom colNoms mtxs = do
+  unless (null mtxs) $ do
+    let numCols = length colNoms
+    let cols = LBS.intercalate "," colNoms
+    let cols' = "(" <> cols <> ")"
+    let valMask = LBS.intercalate "," $ replicate numCols "?"
+    let valMask' = "(" <> valMask <> ")"
+    let numVals = length mtxs
+    let values = map myTxValue mtxs
+    let vals = if numVals > 1
+                then
+                  let valMasks =  replicate numVals valMask'
+                  in "values " <> LBS.intercalate "," valMasks
+                else "value " <> valMask'
+    let qry = "insert into " <> tblNom <> " " <> cols' <> " " <> vals <> ";"
+    execute myCon (Query qry) (concat values) >>= printErr
+    --print $ show qry ++ " <-- " ++ show values
+
 createTableBlocksQ = "create table blocks (blkNum integer unsigned not null, blkHash binary(32) not null, miner binary(20) not null, difficulty binary(32) not null, gasLimit bigint unsigned not null, primary key (blkNum));"
 createIndexMinerQ = "create index miner on blocks (miner);"
 createIndexBlkHashQ = "create index blkHash on blocks (blkHash);"
@@ -124,6 +142,7 @@ insertBlockP blkNum blkHash miner difficulty gasLimit =
 insertBlock myCon blkNum blkHash miner difficulty gasLimit = do
   print ("blk", blkNum, blkHash, miner, difficulty, gasLimit)
   execute myCon insertBlockQ (insertBlockP blkNum blkHash miner difficulty gasLimit) >>= printErr
+insertBlocks myCon = tableInsertMyTxs myCon "blocks" ["blkNum","blkHash","miner","difficulty","gasLimit"]
 
 createTableTxsQ = "create table txs (blkNum integer unsigned not null, txIdx smallint unsigned not null, txHash binary(32) not null, txValue binary(32) not null, gas integer unsigned not null, failed boolean not null, maskOpcodes bit(64) not null, primary key (blkNum,txIdx));"
 createIndexTxHashQ = "create index txHash on txs (txHash);"
@@ -140,6 +159,7 @@ insertTxP blkNum txIdx txHash value gas failed mop =
 insertTx myCon blkNum txIdx txHash value gas failed mop = do
   print ("tx", blkNum, txIdx, txHash, value, gas, failed, toHex mop)
   execute myCon insertTxQ (insertTxP blkNum txIdx txHash value gas failed mop) >>= printErr
+insertTxs myCon = tableInsertMyTxs myCon "txs" ["blkNum","txIdx","txHash","txValue","gas","failed","maskOpcodes"]
 
 createTableMsgCallsQ = "create table msgCalls (blkNum integer unsigned not null, txIdx smallint unsigned not null, fromA binary(20) not null, toA binary(20) not null, primary key (blkNum,txIdx));"
 createIndexMsgCallFromQ = "create index msgCallFrom on msgCalls (fromA);"
@@ -154,6 +174,7 @@ insertMsgCallP blkNum txIdx fromA toA =
 insertMsgCall myCon blkNum txIdx fromA toA = do
   print ("call", blkNum, txIdx, fromA, toA)
   execute myCon insertMsgCallQ (insertMsgCallP blkNum txIdx fromA toA) >>= printErr
+insertMsgCalls myCon = tableInsertMyTxs myCon "msgCalls" ["blkNum","txIdx","fromA","toA"]
 selectMsgCallHasFromQ = "select * from msgCalls where fromA = ? limit 1;"
 selectMsgCallHasFromP addr = [mySetAddr addr]
 selectMsgCallHasFrom myCon addr = do
@@ -180,6 +201,7 @@ insertContractCreationP blkNum txIdx fromA contractA =
 insertContractCreation myCon blkNum txIdx fromA contractA = do
   print ("new", blkNum, txIdx, fromA, contractA)
   execute myCon insertContractCreationQ (insertContractCreationP blkNum txIdx fromA contractA) >>= printErr
+insertContractCreations myCon = tableInsertMyTxs myCon "contractCreations" ["blkNum","txIdx","fromA","contractA"]
 selectContractCreationHasFromQ = "select * from contractCreations where fromA = ? limit 1;"
 selectContractCreationHasFromP addr = [mySetAddr addr]
 selectContractCreationHasFrom myCon addr = do
@@ -208,6 +230,7 @@ insertInternalTxP blkNum txIdx idx fromA addr opcode =
 insertInternalTx myCon blkNum txIdx idx fromA addr opcode = do
   print ("itx", blkNum, txIdx, idx, fromA, addr, toHex opcode)
   execute myCon insertInternalTxQ (insertInternalTxP blkNum txIdx idx fromA addr opcode) >>= printErr
+insertInternalTxs myCon = tableInsertMyTxs myCon "internalTxs" ["blkNum","txIdx","idx","fromA","addr","opcode"]
 selectInternalTxCountAddrQ = "select count(*) from internalTxs where ((opcode = ? or opcode = ? or opcode = ? or opcode = ?) and fromA = ?) or (opcode = ? and addr = ?);"
 selectInternalTxCountAddrP addr =
   [ mySetOp opCall
@@ -457,9 +480,43 @@ dbInsertBlock url myCon blkNum = do
                     (fromJust $ rebMiner blk) (rebDifficulty blk)
                     (rebGasLimit blk)
   myDbTxs <- mapM (dbInsertTx url . (\(POObject tx) -> tx)) (getTxs blk)
-  ignoreCtrlC $ withTransaction $ do
+  let (rTx,rNew,rCall,rItx,rDacc) = spanDbTxs myDbTxs
+  ignoreCtrlC $ withTransaction myCon $ do
     dbInsertMyTx myCon mtx
-    mapM_ (dbInsertMyTxs url myCon) myDbTxs
+    insertTxs myCon rTx
+    insertContractCreations myCon rNew
+    insertMsgCalls myCon rCall
+    insertInternalTxs myCon rItx
+    mapM_ (dbInsertMyTouchedAccount url myCon) rDacc
+
+spanDbTxs = reverseDbTxs . foldl spanMyTxs ([],[],[],[],[])
+reverseDbTxs (rTx,rNew,rCall,rItx,rDacc) =
+  ( reverse rTx
+  , reverse rNew
+  , reverse rCall
+  , reverse rItx
+  , rDacc
+  )
+spanMyTxs r@(rTx,rNew,rCall,rItx,rDacc) (mtxs,mdas) =
+  let (rTx',rNew',rCall',rItx',_) = foldl spanMyTx r mtxs
+  in (rTx',rNew',rCall',rItx',rDacc++mdas)
+spanMyTx (rTx,rNew,rCall,rItx,rDacc) mtx = case mtx of
+  (MyTx _ _ _ _ _ _ _) -> (mtx:rTx,rNew,rCall,rItx,rDacc)
+  (MyContractCreation _ _ _ _) -> (rTx,mtx:rNew,rCall,rItx,rDacc)
+  (MyMsgCall _ _ _ _) -> (rTx,rNew,mtx:rCall,rItx,rDacc)
+  (MyInternalTx _ _ _ _ _ _) -> (rTx,rNew,rCall,mtx:rItx,rDacc)
+  _ -> error $ "spanMyTx: " ++ show mtx
+
+myTxValue mtx = case mtx of
+  (MyTx blkNum txIdx txHash value gas failed mop) ->
+    insertTxP blkNum txIdx txHash value gas failed mop
+  (MyContractCreation blkNum txIdx fromA contractA) ->
+    insertContractCreationP blkNum txIdx fromA contractA
+  (MyMsgCall blkNum txIdx fromA toA) ->
+    insertMsgCallP blkNum txIdx fromA toA
+  (MyInternalTx blkNum txIdx idx fromA addr opcode) ->
+    insertInternalTxP blkNum txIdx idx fromA addr opcode
+  _ -> error $ "myTxValue: " ++ show mtx
 
 dbInsertMyTxs url myCon (mtxs,mdas) = do
   mapM_ (dbInsertMyTx myCon) mtxs
