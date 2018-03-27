@@ -175,17 +175,27 @@ insertMsgCall myCon blkNum txIdx fromA toA = do
   print ("call", blkNum, txIdx, fromA, toA)
   execute myCon insertMsgCallQ (insertMsgCallP blkNum txIdx fromA toA) >>= printErr
 insertMsgCalls myCon = tableInsertMyTxs myCon "msgCalls" ["blkNum","txIdx","fromA","toA"]
-selectMsgCallHasFromQ = "select * from msgCalls where fromA = ? limit 1;"
-selectMsgCallHasFromP addr = [mySetAddr addr]
-selectMsgCallHasFrom myCon addr = do
+selectMsgCallHasFromQ = "select * from msgCalls where fromA = ? where blkNum < ? or (blkNum = ? and txIdx < ?) limit 1;"
+selectMsgCallHasFromP blkNum txIdx addr =
+  [ mySetAddr addr
+  , mySetBlkNum blkNum
+  , mySetBlkNum blkNum
+  , mySetTxIdx txIdx
+  ]
+selectMsgCallHasFrom myCon blkNum txIdx addr = do
   (colDefs,isValues) <- query myCon selectMsgCallHasFromQ
-                                      (selectMsgCallHasFromP addr)
+                          (selectMsgCallHasFromP blkNum txIdx addr)
   not . null . fromJust <$> myReadAndSkipToEof isValues
-selectMsgCallCountFromQ = "select count(*) from msgCalls where fromA = ?;"
-selectMsgCallCountFromP addr = [mySetAddr addr]
-selectMsgCallCountFrom myCon addr = do
+selectMsgCallCountFromQ = "select count(*) from msgCalls where fromA = ? where blkNum < ? or (blkNum = ? and txIdx < ?);"
+selectMsgCallCountFromP blkNum txIdx addr =
+  [ mySetAddr addr
+  , mySetBlkNum blkNum
+  , mySetBlkNum blkNum
+  , mySetTxIdx txIdx
+  ]
+selectMsgCallCountFrom myCon blkNum txIdx addr = do
   (colDefs,isValues) <- query myCon selectMsgCallCountFromQ
-                                      (selectMsgCallCountFromP addr)
+                          (selectMsgCallCountFromP blkNum txIdx addr)
   myGetNum . head . fromJust <$> myReadAndSkipToEof isValues
 
 createTableContractCreationsQ = "create table contractCreations (blkNum integer unsigned not null, txIdx smallint unsigned not null, fromA binary(20) not null, contractA binary(20) not null, primary key (blkNum,txIdx));"
@@ -202,17 +212,27 @@ insertContractCreation myCon blkNum txIdx fromA contractA = do
   print ("new", blkNum, txIdx, fromA, contractA)
   execute myCon insertContractCreationQ (insertContractCreationP blkNum txIdx fromA contractA) >>= printErr
 insertContractCreations myCon = tableInsertMyTxs myCon "contractCreations" ["blkNum","txIdx","fromA","contractA"]
-selectContractCreationHasFromQ = "select * from contractCreations where fromA = ? limit 1;"
-selectContractCreationHasFromP addr = [mySetAddr addr]
-selectContractCreationHasFrom myCon addr = do
+selectContractCreationHasFromQ = "select * from contractCreations where fromA = ? where blkNum < ? or (blkNum = ? and txIdx < ?) limit 1;"
+selectContractCreationHasFromP blkNum txIdx addr =
+  [ mySetAddr addr
+  , mySetBlkNum blkNum
+  , mySetBlkNum blkNum
+  , mySetTxIdx txIdx
+  ]
+selectContractCreationHasFrom myCon blkNum txIdx addr = do
   (colDefs,isValues) <- query myCon selectContractCreationHasFromQ
-                                (selectContractCreationHasFromP addr)
+                          (selectContractCreationHasFromP blkNum txIdx addr)
   not . null . fromJust <$> myReadAndSkipToEof isValues
-selectContractCreationCountFromQ = "select count(*) from contractCreations where fromA = ?;"
-selectContractCreationCountFromP addr = [mySetAddr addr]
-selectContractCreationCountFrom myCon addr = do
+selectContractCreationCountFromQ = "select count(*) from contractCreations where fromA = ? where blkNum < ? or (blkNum = ? and txIdx < ?);"
+selectContractCreationCountFromP blkNum txIdx addr =
+  [ mySetAddr addr
+  , mySetBlkNum blkNum
+  , mySetBlkNum blkNum
+  , mySetTxIdx txIdx
+  ]
+selectContractCreationCountFrom myCon blkNum txIdx addr = do
   (colDefs,isValues) <- query myCon selectContractCreationCountFromQ
-                                (selectContractCreationCountFromP addr)
+                          (selectContractCreationCountFromP blkNum txIdx addr)
   myGetNum . head . fromJust <$> myReadAndSkipToEof isValues
 
 createTableInternalTxsQ = "create table internalTxs (blkNum integer unsigned not null, txIdx smallint unsigned not null, idx mediumint unsigned not null, fromA binary(20) not null, addr binary(20) not null, opcode tinyint unsigned not null, primary key (blkNum,txIdx,idx));"
@@ -475,12 +495,12 @@ ignoreCtrlC f = do
 dbInsertBlock :: String -> MySQLConn -> BlockNum -> IO ()
 dbInsertBlock url myCon blkNum = do
   blk <- fromJust . fromRight "eth_getBlockByNumber"
-      <$> runWeb3 False url (eth_getBlockByNumber (RPBNum blkNum) True)
+     <$> runWeb3 False url (eth_getBlockByNumber (RPBNum blkNum) True)
   let mtx = MyBlock blkNum (fromJust $ rebHash blk)
                     (fromJust $ rebMiner blk) (rebDifficulty blk)
                     (rebGasLimit blk)
   myDbTxs <- mapM (dbInsertTx url . (\(POObject tx) -> tx)) (getTxs blk)
-  let (rTx,rNew,rCall,rItx,rDacc) = spanDbTxs myDbTxs
+  let (!rTx,!rNew,!rCall,!rItx,!rDacc) = spanDbTxs myDbTxs
   ignoreCtrlC $ withTransaction myCon $ do
     dbInsertMyTx myCon mtx
     insertTxs myCon rTx
@@ -684,10 +704,10 @@ opcodeNoms =
   , ["SSTORE"]
   , ["JUMP","JUMPI","JUMPDEST"]
   , ["PC","MSIZE","GAS"]
-  , ["PUSH1","PUSH2","PUSH3","PUSH4","PUSH5","PUSH6","PUSH7","PUSH8","PUSH9","PUSH10","PUSH11","PUSH12","PUSH13","PUSH14","PUSH15","PUSH16","PUSH17","PUSH18","PUSH19","PUSH20","PUSH21","PUSH22","PUSH23","PUSH24","PUSH25","PUSH26","PUSH27","PUSH28","PUSH29","PUSH30","PUSH31","PUSH32"]
-  , ["DUP1","DUP2","DUP3","DUP4","DUP5","DUP6","DUP7","DUP8","DUP9","DUP10","DUP11","DUP12","DUP13","DUP14","DUP15","DUP16"]
-  , ["SWAP1","SWAP2","SWAP3","SWAP4","SWAP5","SWAP6","SWAP7","SWAP8","SWAP9","SWAP10","SWAP11","SWAP12","SWAP13","SWAP14","SWAP15","SWAP16"]
-  , ["LOG0","LOG1","LOG2","LOG3","LOG4"]
+  , mapOpIdx "PUSH" 1 32
+  , mapOpIdx "DUP" 1 16
+  , mapOpIdx "SWAP" 1 16
+  , mapOpIdx "LOG" 0 4
   , ["CREATE"]
   , ["CALL"]
   , ["CALLCODE"]
@@ -696,47 +716,43 @@ opcodeNoms =
   , ["INVALID"]
   , ["SELFDESTRUCT"]
   ]
+  where
+    mapOpIdx op minIdx maxIdx = map ((op<>) . T.pack . show) [minIdx..maxIdx]
 
 dbInsertMyTouchedAccount url myCon mtx = case mtx of
   (MyTouchedAccount blkNum txIdx addr) -> do
-    yetIs <- isJust <$> selectDeadAccountAddr myCon addr
-    unless yetIs $ do
-      isDead <- isDeadAccount url myCon blkNum txIdx addr
-      when isDead $ insertDeadAccount myCon blkNum txIdx addr
+    let proto = ethProto publicEthProtoCfg blkNum
+    if proto `elem` enumFrom SpuriousDragon
+      then do
+        yetIs <- isJust <$> selectDeadAccountAddr myCon addr
+        unless yetIs $ do
+          isDead <- isDeadAccount url myCon blkNum txIdx addr
+          when isDead $ insertDeadAccount myCon blkNum txIdx addr
+      else return False
   _ -> error $ "dbInsertMyTouchedAccount: " ++ show mtx
 
-isDeadAccount :: String -> MySQLConn
-              -> BlockNum -> Int -> HexEthAddr -> IO Bool
 isDeadAccount url myCon blkNum txIdx addr = do
-  if nullAddr addr
+  if isReservedAddr addr
     then return False
-    else do
-      let proto = ethProto publicEthProtoCfg blkNum
-      if proto `elem` enumFrom SpuriousDragon
-        then if isReservedAddr addr
-              then return False
-              else isEmptyAccount url myCon blkNum addr
-        else return False
+    else isEmptyAccount url myCon blkNum txIdx addr
 
-isEmptyAccount :: String -> MySQLConn
-               -> BlockNum -> HexEthAddr -> IO Bool
-isEmptyAccount url myCon blkNum addr = do
+isEmptyAccount url myCon blkNum txIdx addr = do
   balance <- maybe 0 id . fromRight "eth_getBalance'"
          <$> runWeb3 False url (eth_getBalance' addr $ RPBNum blkNum)
   if balance /= 0
     then return False
     else do
       hasCode <- not . (=="0x") . fromRight "eth_getCode"
-            <$> runWeb3 False url (eth_getCode addr $ RPBNum blkNum)
+             <$> runWeb3 False url (eth_getCode addr $ RPBNum blkNum)
       if hasCode == True
         then return False
-        else not <$> accountHasNonce myCon addr
+        else not <$> accountHasNonce myCon blkNum txIdx addr
 
-accountHasNonce myCon addr = do
-  hasNonce <- selectMsgCallHasFrom myCon addr
+accountHasNonce myCon blkNum txIdx addr = do
+  hasNonce <- selectMsgCallHasFrom myCon blkNum txIdx addr
   if hasNonce
     then return True
-    else selectContractCreationHasFrom myCon addr
+    else selectContractCreationHasFrom myCon blkNum txIdx addr
 
 accountNonce myCon addr = (+)
                       <$> selectMsgCallCountFrom myCon addr
