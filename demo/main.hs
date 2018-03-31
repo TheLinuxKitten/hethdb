@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_GHC -Wmissing-signatures #-}
@@ -38,20 +39,21 @@ import System.IO (BufferMode(..),hPutStrLn,hSetBuffering,stderr,stdout)
 import qualified System.IO.Streams as IOS
 import System.Posix.Signals
 
-getOps :: IO (String,BlockNum,BlockNum,Bool,Bool)
+getOps :: IO (String,BlockNum,BlockNum,Bool,Bool,Bool)
 getOps = do
   prog <- getProgName
-  go prog ("http://192.168.122.201:8543",0,100,False,False) <$> getArgs
+  go prog ("http://192.168.122.201:8543",0,100,False,False,False) <$> getArgs
   where
-    go p (url,iniBlk,numBlks,iniDb,doLog) ("--http":a:as) = go p (a,iniBlk,numBlks,iniDb,doLog) as
-    go p (url,iniBlk,numBlks,iniDb,doLog) ("--iniBlk":a:as) = go p (url, read a, numBlks, iniDb,doLog) as
-    go p (url,iniBlk,numBlks,iniDb,doLog) ("--numBlks":a:as) = go p (url, iniBlk,read a,iniDb,doLog) as
-    go p (url,iniBlk,numBlks,iniDb,doLog) ("--initDb":as) = go p (url, iniBlk,numBlks, True,doLog) as
-    go p (url,iniBlk,numBlks,iniDb,doLog) ("--log":as) = go p (url, iniBlk,numBlks, iniDb,True) as
+    go p (url,iniBlk,numBlks,iniDb,doLog,doTest) ("--http":a:as) = go p (a,iniBlk,numBlks,iniDb,doLog,doTest) as
+    go p (url,iniBlk,numBlks,iniDb,doLog,doTest) ("--iniBlk":a:as) = go p (url, read a, numBlks, iniDb,doLog,doTest) as
+    go p (url,iniBlk,numBlks,iniDb,doLog,doTest) ("--numBlks":a:as) = go p (url, iniBlk,read a,iniDb,doLog,doTest) as
+    go p (url,iniBlk,numBlks,iniDb,doLog,doTest) ("--initDb":as) = go p (url, iniBlk,numBlks, True,doLog,doTest) as
+    go p (url,iniBlk,numBlks,iniDb,doLog,doTest) ("--log":as) = go p (url, iniBlk,numBlks, iniDb,True,doTest) as
+    go p (url,iniBlk,numBlks,iniDb,doLog,doTest) ("--test":as) = go p (url, iniBlk,numBlks, iniDb,doLog,True) as
     go p _ ("-h":as) = msgUso p
     go p _ ("--help":as) = msgUso p
     go _ r [] = r
-    msgUso p = error $ p ++ " [-h|--help] [--http url] [--iniBlk <num>] [--numBlks <num>] [--initDb] [--log]"
+    msgUso p = error $ p ++ " [-h|--help] [--http url] [--iniBlk <num>] [--numBlks <num>] [--initDb] [--log] [--test]"
 
 defConInfo = defaultConnectInfo
   { ciUser = "kitten"
@@ -312,16 +314,32 @@ runWeb3 doLog url f = runWeb3N 1
 
 main :: IO ()
 main = do
-  (url,iniBlk,numBlks,iniDb,doLog) <- getOps
-  --let addr = HexEthAddr "0x6a0a0fc761c612c340a0e98d33b37a75e5268472"
-  --let nonces = [1..9999]
-  --let cAddrs = map (contractAddress addr) nonces
-  --mapM_ print $ zip cAddrs nonces
-  --mapM_ (putStrLn . T.unpack) $ fromRight $ parseEvmCode "0x6004600c60003960046000f3600035ff00000000000000000000000000000000"
-  --code <- fromRight <$> runWeb3 False url (eth_getCode (HexEthAddr "0x6a0a0fc761c612c340a0e98d33b37a75e5268472") RPBLatest)
-  --mapM_ (putStrLn . T.unpack) $ fromRight $ parseEvmCode code
-  --tests doLog url iniBlk numBlks
-  updateDb url iniBlk numBlks iniDb
+  (url,iniBlk,numBlks,iniDb,doLog,doTest) <- getOps
+  if doTest
+    then tests url iniBlk numBlks doLog
+    else updateDb url iniBlk numBlks iniDb
+
+tests url iniBlk numBlks doLog = do
+  testLongQ
+  let addr = HexEthAddr "0x6a0a0fc761c612c340a0e98d33b37a75e5268472"
+  let nonces = [1..9999]
+  let cAddrs = map (contractAddress addr) nonces
+  mapM_ print $ zip cAddrs nonces
+  mapM_ (putStrLn . T.unpack) $ fromRight "parseEvmCode" $ parseEvmCode "0x6004600c60003960046000f3600035ff00000000000000000000000000000000"
+  code <- fromRight "eth_getCode"
+      <$> runWeb3 False url (eth_getCode (HexEthAddr "0x6a0a0fc761c612c340a0e98d33b37a75e5268472") RPBLatest)
+  mapM_ (putStrLn . T.unpack) $ fromRight "parseEvmCode" $ parseEvmCode code
+  testTraceTree doLog url iniBlk numBlks
+
+testLongQ = do
+  (greet,myCon) <- connectDetail defConInfo
+  printErr greet
+  (colDefs,iMyValues) <- query_ myCon "select * from blocks;"
+  print colDefs
+  mVals <- mapM (\_ -> IOS.read iMyValues) (replicate 30 "a")
+  mapM_ print mVals
+  skipToEof iMyValues
+  close myCon
 
 contractAddress :: HexEthAddr -> Integer -> HexEthAddr
 contractAddress addr nonce =
@@ -335,8 +353,8 @@ contractAddress addr nonce =
 
 getTxs = sortTxs . rebTransactions
 
-tests :: Bool -> String -> BlockNum -> BlockNum -> IO ()
-tests doLog url iniBlk numBlks = do
+testTraceTree :: Bool -> String -> BlockNum -> BlockNum -> IO ()
+testTraceTree doLog url iniBlk numBlks = do
   hSetBuffering stdout NoBuffering
   hSetBuffering stderr NoBuffering
   let blks = map (iniBlk+) [0 .. numBlks-1]
@@ -520,7 +538,7 @@ reverseDbTxs (rTx,rNew,rCall,rItx,rDacc) =
 spanMyTxs r@(rTx,rNew,rCall,rItx,rDacc) (mtxs,mdas) =
   let (rTx',rNew',rCall',rItx',_) = foldl spanMyTx r mtxs
   in (rTx',rNew',rCall',rItx',rDacc++mdas)
-spanMyTx (rTx,rNew,rCall,rItx,rDacc) mtx = case mtx of
+spanMyTx (rTx,rNew,rCall,rItx,rDacc) !mtx = case mtx of
   (MyTx _ _ _ _ _ _ _) -> (mtx:rTx,rNew,rCall,rItx,rDacc)
   (MyContractCreation _ _ _ _) -> (rTx,mtx:rNew,rCall,rItx,rDacc)
   (MyMsgCall _ _ _ _) -> (rTx,rNew,mtx:rCall,rItx,rDacc)
@@ -722,13 +740,11 @@ opcodeNoms =
 dbInsertMyTouchedAccount url myCon mtx = case mtx of
   (MyTouchedAccount blkNum txIdx addr) -> do
     let proto = ethProto publicEthProtoCfg blkNum
-    if proto `elem` enumFrom SpuriousDragon
-      then do
-        yetIs <- isJust <$> selectDeadAccountAddr myCon addr
-        unless yetIs $ do
-          isDead <- isDeadAccount url myCon blkNum txIdx addr
-          when isDead $ insertDeadAccount myCon blkNum txIdx addr
-      else return False
+    when (proto `elem` enumFrom SpuriousDragon) $ do
+      yetIs <- isJust <$> selectDeadAccountAddr myCon addr
+      unless yetIs $ do
+        isDead <- isDeadAccount url myCon blkNum txIdx addr
+        when isDead $ insertDeadAccount myCon blkNum txIdx addr
   _ -> error $ "dbInsertMyTouchedAccount: " ++ show mtx
 
 isDeadAccount url myCon blkNum txIdx addr = do
