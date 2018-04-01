@@ -1,0 +1,52 @@
+#!/bin/bash
+
+DEMO_DIR=$(dirname `readlink -f -n "$0"`)
+
+DB_IMAGE=mariadb:10.3
+DB_CONTAINER_NAME=ethdb
+DB_ROOT_PASSWORD=ethereum
+DB_DATADIR=/opt/eth/mysql-data
+DB_INIT_DATADIR=$DEMO_DIR/../mysql
+DB_USER=kitten
+DB_USER_PASSWORD=kitten
+DB_NAME=ethdb
+
+docker_mysql_ip() {
+    docker inspect $DB_CONTAINER_NAME | grep '"IPAddress"' | head -1 | cut -d'"' -f4
+}
+
+docker_mysql_client() {
+    docker run -it --link $DB_CONTAINER_NAME --rm $DB_IMAGE \
+        sh -c "exec mysql -h\"\$ETHDB_PORT_3306_TCP_ADDR\" -u\"$1\" -p\"$2\""
+}
+
+docker_mysql_client_root() {
+    docker_mysql_client root $DB_ROOT_PASSWORD
+}
+
+docker_mysql_client_user() {
+    docker_mysql_client $DB_USER $DB_USER_PASSWORD
+}
+
+docker_mysql_init() {
+    docker run --name $DB_CONTAINER_NAME \
+        -v $DB_DATADIR:/var/lib/mysql \
+        -v $DB_INIT_DATADIR:/docker-entrypoint-initdb.d \
+        -e MYSQL_DATABASE=$DB_NAME \
+        -e MYSQL_USER=$DB_USER \
+        -e MYSQL_PASSWORD=$DB_USER_PASSWORD \
+        -e MYSQL_ROOT_PASSWORD=$DB_ROOT_PASSWORD $DB_IMAGE
+}
+
+docker_mysql_run() {
+    docker run --name $DB_CONTAINER_NAME -ti --rm \
+        -v $DB_DATADIR:/var/lib/mysql \
+        -e MYSQL_ROOT_PASSWORD=$DB_ROOT_PASSWORD $DB_IMAGE
+}
+
+[ -z "$1" ] && echo "Uso: $0 {--init|--run|--cli-root|--cli-user}" && exit 1
+[ "$1" = "--init" ] && docker_mysql_init && exit 0
+[ "$1" = "--run" ] && docker_mysql_run && exit 0
+[ "$1" = "--cli-root" ] && docker_mysql_client_root && exit 0
+[ "$1" = "--cli-user" ] && docker_mysql_client_user && exit 0
+
