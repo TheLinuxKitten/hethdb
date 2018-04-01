@@ -35,30 +35,34 @@ import Network.Web3.Dapp.Bytes
 import Network.Web3.Dapp.EthABI (keccak256)
 import Network.Web3.Dapp.Int
 import System.Environment (getArgs,getProgName)
-import System.IO (BufferMode(..),hPutStrLn,hSetBuffering,stderr,stdout)
+import System.IO (BufferMode(..),hPrint,hPutStrLn,hSetBuffering,stderr,stdout)
 import qualified System.IO.Streams as IOS
 import System.Posix.Signals
 
-getOps :: IO (String,BlockNum,BlockNum,Bool,Bool,Bool)
+getOps :: IO (String,Integer,String,BlockNum,BlockNum,Bool,Bool,Bool)
 getOps = do
   prog <- getProgName
-  go prog ("http://192.168.122.201:8543",0,100,False,False,False) <$> getArgs
+  go prog ("localhost",3306,"http://192.168.122.201:8543",0,100,False,False,False) <$> getArgs
   where
-    go p (url,iniBlk,numBlks,iniDb,doLog,doTest) ("--http":a:as) = go p (a,iniBlk,numBlks,iniDb,doLog,doTest) as
-    go p (url,iniBlk,numBlks,iniDb,doLog,doTest) ("--iniBlk":a:as) = go p (url, read a, numBlks, iniDb,doLog,doTest) as
-    go p (url,iniBlk,numBlks,iniDb,doLog,doTest) ("--numBlks":a:as) = go p (url, iniBlk,read a,iniDb,doLog,doTest) as
-    go p (url,iniBlk,numBlks,iniDb,doLog,doTest) ("--initDb":as) = go p (url, iniBlk,numBlks, True,doLog,doTest) as
-    go p (url,iniBlk,numBlks,iniDb,doLog,doTest) ("--log":as) = go p (url, iniBlk,numBlks, iniDb,True,doTest) as
-    go p (url,iniBlk,numBlks,iniDb,doLog,doTest) ("--test":as) = go p (url, iniBlk,numBlks, iniDb,doLog,True) as
+    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) ("--myHttp":a:as) = go p (a,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) ("--myPort":a:as) = go p (myUrl,read a,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) ("--ethHttp":a:as) = go p (myUrl,myPort,a,iniBlk,numBlks,iniDb,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) ("--iniBlk":a:as) = go p (myUrl,myPort,ethUrl, read a, numBlks, iniDb,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) ("--numBlks":a:as) = go p (myUrl,myPort,ethUrl, iniBlk,read a,iniDb,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) ("--initDb":as) = go p (myUrl,myPort,ethUrl, iniBlk,numBlks, True,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) ("--log":as) = go p (myUrl,myPort,ethUrl, iniBlk,numBlks, iniDb,True,doTest) as
+    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) ("--test":as) = go p (myUrl,myPort,ethUrl, iniBlk,numBlks, iniDb,doLog,True) as
     go p _ ("-h":as) = msgUso p
     go p _ ("--help":as) = msgUso p
     go _ r [] = r
-    msgUso p = error $ p ++ " [-h|--help] [--http url] [--iniBlk <num>] [--numBlks <num>] [--initDb] [--log] [--test]"
+    msgUso p = error $ p ++ " [-h|--help] [--myHttp myUrl] [--myPort <port>] [--ethHttp ethUrl] [--iniBlk <num>] [--numBlks <num>] [--initDb] [--log] [--test]"
 
-defConInfo = defaultConnectInfo
+defConInfo myUrl myPort = defaultConnectInfo
   { ciUser = "kitten"
   , ciPassword = "kitten"
   , ciDatabase = "ethdb"
+  , ciHost = myUrl
+  , ciPort = fromInteger myPort
   }
 
 rootConInfo = defaultConnectInfo { ciUser = "root", ciPassword = "" }
@@ -66,7 +70,7 @@ rootConInfo = defaultConnectInfo { ciUser = "root", ciPassword = "" }
 putStrLnErr = hPutStrLn stderr
 
 printErr :: (Show a) => a -> IO ()
-printErr = hPutStrLn stderr . show
+printErr = hPrint stderr
 
 data MysqlTx =
     MyBlock BlockNum HexHash256 HexEthAddr Integer Gas
@@ -112,7 +116,7 @@ insertGenesis myCon addr balance = do
   print ("gen",addr,toHex balance)
   execute myCon insertGenesisQ (insertGenesisP addr balance) >>= printErr
 
-tableInsertMyTxs myCon tblNom colNoms mtxs = do
+tableInsertMyTxs myCon tblNom colNoms mtxs =
   unless (null mtxs) $ do
     let numCols = length colNoms
     let cols = LBS.intercalate "," colNoms
@@ -292,15 +296,15 @@ createLastBlkQ = "create table lastBlk (blkNum integer unsigned not null, primar
 insertLastBlkQ = "insert into lastBlk (blkNum) value (?);"
 lastBlkP blkNum = [mySetBlkNum blkNum]
 selectLastBlkQ = "select blkNum from lastBlk order by blkNum desc limit 1;"
-readLastBlk isValues = do
-  myGetNum . head . fromJust <$> myReadAndSkipToEof isValues
+readLastBlk isValues = myGetNum . head . fromJust
+                   <$> myReadAndSkipToEof isValues
 
-runWeb3 doLog url f = runWeb3N 1
+runWeb3 doLog ethUrl f = runWeb3N 1
   where
     runWeb3N n = do
       er <- runWeb3'
       case er of
-        Left e -> do
+        Left e ->
           if n > 10
             then return er
             else do
@@ -310,29 +314,29 @@ runWeb3 doLog url f = runWeb3N 1
     runWeb3' = runStderrLoggingT
              $ filterLoggerLogLevel
                    (if doLog then LevelDebug else LevelOther "NoLogs")
-             $ runWeb3HttpT 15 15 url f
+             $ runWeb3HttpT 15 15 ethUrl f
 
 main :: IO ()
 main = do
-  (url,iniBlk,numBlks,iniDb,doLog,doTest) <- getOps
+  (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) <- getOps
   if doTest
-    then tests url iniBlk numBlks doLog
-    else updateDb url iniBlk numBlks iniDb
+    then tests myUrl myPort ethUrl iniBlk numBlks doLog
+    else updateDb myUrl myPort ethUrl iniBlk numBlks iniDb
 
-tests url iniBlk numBlks doLog = do
-  testLongQ
+tests myUrl myPort ethUrl iniBlk numBlks doLog = do
+  testLongQ myUrl myPort
   let addr = HexEthAddr "0x6a0a0fc761c612c340a0e98d33b37a75e5268472"
   let nonces = [1..9999]
   let cAddrs = map (contractAddress addr) nonces
   mapM_ print $ zip cAddrs nonces
   mapM_ (putStrLn . T.unpack) $ fromRight "parseEvmCode" $ parseEvmCode "0x6004600c60003960046000f3600035ff00000000000000000000000000000000"
   code <- fromRight "eth_getCode"
-      <$> runWeb3 False url (eth_getCode (HexEthAddr "0x6a0a0fc761c612c340a0e98d33b37a75e5268472") RPBLatest)
+      <$> runWeb3 False ethUrl (eth_getCode (HexEthAddr "0x6a0a0fc761c612c340a0e98d33b37a75e5268472") RPBLatest)
   mapM_ (putStrLn . T.unpack) $ fromRight "parseEvmCode" $ parseEvmCode code
-  testTraceTree doLog url iniBlk numBlks
+  testTraceTree doLog ethUrl iniBlk numBlks
 
-testLongQ = do
-  (greet,myCon) <- connectDetail defConInfo
+testLongQ myUrl myPort = do
+  (greet,myCon) <- connectDetail (defConInfo myUrl myPort)
   printErr greet
   (colDefs,iMyValues) <- query_ myCon "select * from blocks;"
   print colDefs
@@ -354,29 +358,29 @@ contractAddress addr nonce =
 getTxs = sortTxs . rebTransactions
 
 testTraceTree :: Bool -> String -> BlockNum -> BlockNum -> IO ()
-testTraceTree doLog url iniBlk numBlks = do
+testTraceTree doLog ethUrl iniBlk numBlks = do
   hSetBuffering stdout NoBuffering
   hSetBuffering stderr NoBuffering
   let blks = map (iniBlk+) [0 .. numBlks-1]
   mapM_ (\blkNum -> do
     blk <- fromJust . fromRight "eth_getBlockByNumber"
-       <$> runWeb3 doLog url (eth_getBlockByNumber (RPBNum blkNum) True)
+       <$> runWeb3 doLog ethUrl (eth_getBlockByNumber (RPBNum blkNum) True)
     let txs = getTxs blk
     mapM_ (\(POObject tx) -> do
       let txH = btxHash tx
       let txIdx = fromJust $ btxTransactionIndex tx
       print (blkNum,txIdx)
-      traceTx <- getTraceTx url txH
+      traceTx <- getTraceTx ethUrl txH
       unless (traceTxFailed traceTx) $ do
         let traceLogs = traceTxLogs traceTx
         mapM_ (\trL -> do
           let trOp = traceLogOp trL
           when (testOp trOp) $ putStrLn $ show (toHex blkNum) ++ " " ++ show txIdx ++ " " ++ (show $ traceLogDepth trL) ++ " " ++ (T.unpack trOp) ++ " " ++ (if traceTxFailed traceTx then ("(failed) ") else "") ++ show (map T.unpack $ fromJust $ traceLogStack trL) ++ " " ++ show (traceLogMemory trL)
           ) traceLogs
-        when (any ((\trOp -> trOp=="CREATE") . traceLogOp) traceLogs) $ do
+        when (any ((=="CREATE") . traceLogOp) traceLogs) $ do
           let treeTraceLogs = traceTxTree traceLogs
           -- putStrLnErr $ drawForest $ map (fmap show) $ treeTraceLogs
-          mapM_ (putStrLn . show . snd) $ filterCreateOp treeTraceLogs
+          mapM_ (print . snd) $ filterCreateOp treeTraceLogs
       ) txs
     ) blks
   where
@@ -406,12 +410,12 @@ filterCreateOp :: [Tree RpcTraceLog] -> [(Tree RpcTraceLog,HexEthAddr)]
 filterCreateOp = reverse . fst . foldl filterCreateOp' ([],False)
   where
     filterCreateOp' (r,popVal) n@(Node t@(RpcTraceLog _ me _ _ _ op _ (Just stack) _) forest)
-      | popVal == False =
+      | not popVal =
           let forestCreateOps = filterCreateOp forest
           in case op of
             "CREATE" -> (appendOps (Just (n,addr0)) forestCreateOps r,True)
             _ -> (appendOps Nothing forestCreateOps r,popVal)
-      | popVal == True =
+      | popVal =
           let (n',_) = head r
               r' = tail r
               forestCreateOps = filterCreateOp forest
@@ -425,13 +429,12 @@ filterCreateOp = reverse . fst . foldl filterCreateOp' ([],False)
              in if forestLen == 1 then (head forest:r) else (forest++r)
 
 -- TODO
-updateDb :: String -> BlockNum -> BlockNum -> Bool -> IO ()
-updateDb url blkIni numBlks iniDb = do
+updateDb myUrl myPort ethUrl blkIni numBlks iniDb = do
   --createDb
-  (greet,myCon) <- connectDetail defConInfo
+  (greet,myCon) <- connectDetail (defConInfo myUrl myPort)
   printErr greet
-  when iniDb $ initDb url myCon
-  dbInsertBlocks blkIni numBlks url myCon
+  when iniDb $ initDb ethUrl myCon
+  dbInsertBlocks blkIni numBlks ethUrl myCon
   close myCon
 
 dbGetLastBlk :: MySQLConn -> IO BlockNum
@@ -443,9 +446,9 @@ dbInsertLastBlk :: MySQLConn -> BlockNum -> IO ()
 dbInsertLastBlk myCon blkNum = execute myCon insertLastBlkQ (lastBlkP blkNum) >>= printErr >> return ()
 
 initDb :: String -> MySQLConn -> IO ()
-initDb url myCon = do
+initDb ethUrl myCon = do
   dbCreateTables myCon
-  dbInsertBlock0 url myCon
+  dbInsertBlock0 ethUrl myCon
   dbInsertLastBlk myCon 0
 
 fromRight _ (Right r) = r
@@ -488,17 +491,17 @@ ethProto (EthProtoCfg homestead daofork tangerine spurious byzantium) blkNum =
   in fst $ head $ filter ((blkNum>=) . snd) $ zip protos blkNums
 
 dbInsertBlock0 :: String -> MySQLConn -> IO ()
-dbInsertBlock0 url myCon = do
+dbInsertBlock0 ethUrl myCon = do
   accs <- stateAccounts . fromRight "debug_dumpBlock"
-      <$> runWeb3 False url (debug_dumpBlock 0)
+      <$> runWeb3 False ethUrl (debug_dumpBlock 0)
   mapM_ (\acc -> insertGenesis myCon (accAddr acc) (accBalance acc)) accs
 
 -- TODO
 dbInsertBlocks :: BlockNum -> BlockNum -> String -> MySQLConn -> IO ()
-dbInsertBlocks blk numBlks url myCon = do
+dbInsertBlocks blk numBlks ethUrl myCon = do
   --blk <- dbGetLastBlk myCon
   let blks = map (blk+) [0 .. numBlks-1]
-  mapM_ (dbInsertBlock url myCon) blks
+  mapM_ (dbInsertBlock ethUrl myCon) blks
   --dbInsertLastBlk myCon (last blks)
 
 ignoreCtrlC :: IO a -> IO a
@@ -511,13 +514,13 @@ ignoreCtrlC f = do
   return r
 
 dbInsertBlock :: String -> MySQLConn -> BlockNum -> IO ()
-dbInsertBlock url myCon blkNum = do
+dbInsertBlock ethUrl myCon blkNum = do
   blk <- fromJust . fromRight "eth_getBlockByNumber"
-     <$> runWeb3 False url (eth_getBlockByNumber (RPBNum blkNum) True)
+     <$> runWeb3 False ethUrl (eth_getBlockByNumber (RPBNum blkNum) True)
   let mtx = MyBlock blkNum (fromJust $ rebHash blk)
                     (fromJust $ rebMiner blk) (rebDifficulty blk)
                     (rebGasLimit blk)
-  myDbTxs <- mapM (dbInsertTx url . (\(POObject tx) -> tx)) (getTxs blk)
+  myDbTxs <- mapM (dbInsertTx ethUrl . (\(POObject tx) -> tx)) (getTxs blk)
   let (!rTx,!rNew,!rCall,!rItx,!rDacc) = spanDbTxs myDbTxs
   ignoreCtrlC $ withTransaction myCon $ do
     dbInsertMyTx myCon mtx
@@ -525,7 +528,7 @@ dbInsertBlock url myCon blkNum = do
     insertContractCreations myCon rNew
     insertMsgCalls myCon rCall
     insertInternalTxs myCon rItx
-    mapM_ (dbInsertMyTouchedAccount url myCon) rDacc
+    mapM_ (dbInsertMyTouchedAccount ethUrl myCon) rDacc
 
 spanDbTxs = reverseDbTxs . foldl spanMyTxs ([],[],[],[],[])
 reverseDbTxs (rTx,rNew,rCall,rItx,rDacc) =
@@ -539,10 +542,10 @@ spanMyTxs r@(rTx,rNew,rCall,rItx,rDacc) (mtxs,mdas) =
   let (rTx',rNew',rCall',rItx',_) = foldl spanMyTx r mtxs
   in (rTx',rNew',rCall',rItx',rDacc++mdas)
 spanMyTx (rTx,rNew,rCall,rItx,rDacc) !mtx = case mtx of
-  (MyTx _ _ _ _ _ _ _) -> (mtx:rTx,rNew,rCall,rItx,rDacc)
-  (MyContractCreation _ _ _ _) -> (rTx,mtx:rNew,rCall,rItx,rDacc)
-  (MyMsgCall _ _ _ _) -> (rTx,rNew,mtx:rCall,rItx,rDacc)
-  (MyInternalTx _ _ _ _ _ _) -> (rTx,rNew,rCall,mtx:rItx,rDacc)
+  MyTx {} -> (mtx:rTx,rNew,rCall,rItx,rDacc)
+  MyContractCreation {} -> (rTx,mtx:rNew,rCall,rItx,rDacc)
+  MyMsgCall {} -> (rTx,rNew,mtx:rCall,rItx,rDacc)
+  MyInternalTx {} -> (rTx,rNew,rCall,mtx:rItx,rDacc)
   _ -> error $ "spanMyTx: " ++ show mtx
 
 myTxValue mtx = case mtx of
@@ -556,9 +559,9 @@ myTxValue mtx = case mtx of
     insertInternalTxP blkNum txIdx idx fromA addr opcode
   _ -> error $ "myTxValue: " ++ show mtx
 
-dbInsertMyTxs url myCon (mtxs,mdas) = do
+dbInsertMyTxs ethUrl myCon (mtxs,mdas) = do
   mapM_ (dbInsertMyTx myCon) mtxs
-  mapM_ (dbInsertMyTouchedAccount url myCon) mdas
+  mapM_ (dbInsertMyTouchedAccount ethUrl myCon) mdas
 
 dbInsertMyTx myCon mtx = case mtx of
   (MyBlock blkNum blkHash miner difficulty gasLimit) ->
@@ -575,11 +578,11 @@ dbInsertMyTx myCon mtx = case mtx of
 
 nullAddr = (==addr0)
 
-isReservedAddr addr = any (==addr) [addr0,addr1,addr2,addr3,addr4]
+isReservedAddr addr = addr `elem` [addr0,addr1,addr2,addr3,addr4]
 
 dbInsertTx :: String -> RpcEthBlkTx -> IO ([MysqlTx],[MysqlTx])
-dbInsertTx url (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto txValue _ txGas _ _ _ _) = do
-  txTrace <- getTraceTx url txHash
+dbInsertTx ethUrl (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto txValue _ txGas _ _ _ _) = do
+  txTrace <- getTraceTx ethUrl txHash
   let failed = traceTxFailed txTrace
   let (mop,tls) = if failed
                     then (0,[])
@@ -590,7 +593,7 @@ dbInsertTx url (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto txVal
     Nothing -> do
       cAddr <- fromJust . txrContractAddress . fromJust
              . fromRight "eth_getTransactionReceipt"
-           <$> runWeb3 False url (eth_getTransactionReceipt txHash)
+           <$> runWeb3 False ethUrl (eth_getTransactionReceipt txHash)
       let mtx = MyContractCreation blkNum txIdx from cAddr
       return (mtx,[],cAddr)
     Just to -> do
@@ -618,7 +621,7 @@ dbInsertInternalTxs blkNum txIdx cAddr treeTraceLogs =
     dbInsertInternalTx (idx,from,to,opcode) =
       MyInternalTx blkNum txIdx idx from to opcode
     getItxs idx addr forest = foldl getItx ([],[],idx,addr,forest) forest
-    getItx (r,tchs,idx,addr,(_:ts)) t =
+    getItx (r,tchs,idx,addr,_:ts) t =
       let (RpcTraceLog _ _ _ _ _ op _ mstack _) = rootLabel t
           (addr',itx,tch) = case op of
             "CALL" ->
@@ -661,7 +664,7 @@ dbInsertInternalTxs blkNum txIdx cAddr treeTraceLogs =
           r' = concatRs fItxs (itx:r)
           tchs' = concatRs fTchs (tch:tchs)
       in (r',tchs',nIdx+1,addr,ts)
-    concatRs rs1 rs2 = if null rs1 then rs2 else (rs1++rs2)
+    concatRs rs1 rs2 = if null rs1 then rs2 else rs1++rs2
     concatMaybes = map fromJust . filter isJust
     getStack = reverse . fromJust
     stackAddr' hexD =
@@ -737,30 +740,30 @@ opcodeNoms =
   where
     mapOpIdx op minIdx maxIdx = map ((op<>) . T.pack . show) [minIdx..maxIdx]
 
-dbInsertMyTouchedAccount url myCon mtx = case mtx of
+dbInsertMyTouchedAccount ethUrl myCon mtx = case mtx of
   (MyTouchedAccount blkNum txIdx addr) -> do
     let proto = ethProto publicEthProtoCfg blkNum
     when (proto `elem` enumFrom SpuriousDragon) $ do
       yetIs <- isJust <$> selectDeadAccountAddr myCon addr
       unless yetIs $ do
-        isDead <- isDeadAccount url myCon blkNum txIdx addr
+        isDead <- isDeadAccount ethUrl myCon blkNum txIdx addr
         when isDead $ insertDeadAccount myCon blkNum txIdx addr
   _ -> error $ "dbInsertMyTouchedAccount: " ++ show mtx
 
-isDeadAccount url myCon blkNum txIdx addr = do
+isDeadAccount ethUrl myCon blkNum txIdx addr =
   if isReservedAddr addr
     then return False
-    else isEmptyAccount url myCon blkNum txIdx addr
+    else isEmptyAccount ethUrl myCon blkNum txIdx addr
 
-isEmptyAccount url myCon blkNum txIdx addr = do
+isEmptyAccount ethUrl myCon blkNum txIdx addr = do
   balance <- maybe 0 id . fromRight "eth_getBalance'"
-         <$> runWeb3 False url (eth_getBalance' addr $ RPBNum blkNum)
+         <$> runWeb3 False ethUrl (eth_getBalance' addr $ RPBNum blkNum)
   if balance /= 0
     then return False
     else do
       hasCode <- not . (=="0x") . fromRight "eth_getCode"
-             <$> runWeb3 False url (eth_getCode addr $ RPBNum blkNum)
-      if hasCode == True
+             <$> runWeb3 False ethUrl (eth_getCode addr $ RPBNum blkNum)
+      if hasCode
         then return False
         else not <$> accountHasNonce myCon blkNum txIdx addr
 
@@ -774,8 +777,8 @@ accountNonce myCon addr = (+)
                       <$> selectMsgCallCountFrom myCon addr
                       <*> selectContractCreationCountFrom myCon addr
 
-getTraceTx url txHash = fromRight "debug_traceTransaction"
-                    <$> runWeb3 False url
+getTraceTx ethUrl txHash = fromRight "debug_traceTransaction"
+                       <$> runWeb3 False ethUrl
                             (debug_traceTransaction txHash
                                   (defaultTraceOptions
                                       { traceOpDisableStorage = True
