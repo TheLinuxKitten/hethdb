@@ -15,8 +15,10 @@
 module Main where
 
 import Control.Concurrent (threadDelay)
+import Control.DeepSeq (NFData(..),deepseq,force)
 import Control.Monad (filterM,unless,when)
 import Control.Monad.IO.Class
+import Control.Parallel.Strategies (parList,rdeepseq,withStrategy)
 import Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
@@ -39,23 +41,24 @@ import System.IO (BufferMode(..),hPrint,hPutStrLn,hSetBuffering,stderr,stdout)
 import qualified System.IO.Streams as IOS
 import System.Posix.Signals
 
-getOps :: IO (String,Integer,String,BlockNum,BlockNum,Bool,Bool,Bool)
+getOps :: IO (String,Integer,String,BlockNum,BlockNum,Bool,Bool,Bool,Bool)
 getOps = do
   prog <- getProgName
-  go prog ("localhost",3306,"http://192.168.122.201:8543",0,100,False,False,False) <$> getArgs
+  go prog ("localhost",3306,"http://192.168.122.201:8543",0,100,False,False,False,False) <$> getArgs
   where
-    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) ("--myHttp":a:as) = go p (a,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) ("--myPort":a:as) = go p (myUrl,read a,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) ("--ethHttp":a:as) = go p (myUrl,myPort,a,iniBlk,numBlks,iniDb,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) ("--iniBlk":a:as) = go p (myUrl,myPort,ethUrl, read a, numBlks, iniDb,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) ("--numBlks":a:as) = go p (myUrl,myPort,ethUrl, iniBlk,read a,iniDb,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) ("--initDb":as) = go p (myUrl,myPort,ethUrl, iniBlk,numBlks, True,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) ("--log":as) = go p (myUrl,myPort,ethUrl, iniBlk,numBlks, iniDb,True,doTest) as
-    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) ("--test":as) = go p (myUrl,myPort,ethUrl, iniBlk,numBlks, iniDb,doLog,True) as
+    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--myHttp":a:as) = go p (a,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--myPort":a:as) = go p (myUrl,read a,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--ethHttp":a:as) = go p (myUrl,myPort,a,iniBlk,numBlks,iniDb,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--iniBlk":a:as) = go p (myUrl,myPort,ethUrl, read a, numBlks, iniDb,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--numBlks":a:as) = go p (myUrl,myPort,ethUrl, iniBlk,read a,iniDb,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--initDb":as) = go p (myUrl,myPort,ethUrl, iniBlk,numBlks, True,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--par":as) = go p (myUrl,myPort,ethUrl, iniBlk,numBlks, iniDb,True,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--log":as) = go p (myUrl,myPort,ethUrl, iniBlk,numBlks, iniDb,doPar,True,doTest) as
+    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--test":as) = go p (myUrl,myPort,ethUrl, iniBlk,numBlks, iniDb,doPar,doLog,True) as
     go p _ ("-h":as) = msgUso p
     go p _ ("--help":as) = msgUso p
     go _ r [] = r
-    msgUso p = error $ p ++ " [-h|--help] [--myHttp myUrl] [--myPort <port>] [--ethHttp ethUrl] [--iniBlk <num>] [--numBlks <num>] [--initDb] [--log] [--test]"
+    msgUso p = error $ p ++ " [-h|--help] [--myHttp myUrl] [--myPort <port>] [--ethHttp ethUrl] [--iniBlk <num>] [--numBlks <num>] [--initDb] [--par] [--log] [--test]"
 
 defConInfo myUrl myPort = defaultConnectInfo
   { ciUser = "kitten"
@@ -80,6 +83,43 @@ data MysqlTx =
   | MyInternalTx BlockNum Int Word32 HexEthAddr HexEthAddr Word8
   | MyTouchedAccount BlockNum Int HexEthAddr
   deriving (Eq,Show)
+
+instance NFData MysqlTx where
+  rnf (MyBlock blkNum blkHash miner difficulty gasLimit) = blkNum
+                                                 `deepseq` blkHash
+                                                 `deepseq` miner
+                                                 `deepseq` difficulty
+                                                 `deepseq` gasLimit
+                                                 `deepseq` ()
+  rnf (MyTx blkNum txIdx txHash value gas failed mop) = blkNum
+                                              `deepseq` txIdx
+                                              `deepseq` txHash
+                                              `deepseq` value
+                                              `deepseq` gas
+                                              `deepseq` failed
+                                              `deepseq` mop
+                                              `deepseq` ()
+  rnf (MyContractCreation blkNum txIdx fromA contractA) = blkNum
+                                                `deepseq` txIdx
+                                                `deepseq` fromA
+                                                `deepseq` contractA
+                                                `deepseq` ()
+  rnf (MyMsgCall blkNum txIdx fromA toA) = blkNum
+                                 `deepseq` txIdx
+                                 `deepseq` fromA
+                                 `deepseq` toA
+                                 `deepseq` ()
+  rnf (MyInternalTx blkNum txIdx idx fromA addr opcode) = blkNum
+                                                `deepseq` txIdx
+                                                `deepseq` idx
+                                                `deepseq` fromA
+                                                `deepseq` addr
+                                                `deepseq` opcode
+                                                `deepseq` ()
+  rnf (MyTouchedAccount blkNum txIdx addr) = blkNum `deepseq` txIdx `deepseq` addr `deepseq` ()
+
+instance NFData HexEthAddr where
+  rnf (HexEthAddr addr) = addr `deepseq` ()
 
 mySetBlkNum = MySQLInt32U
 mySetTxIdx = MySQLInt16U . fromIntegral
@@ -115,6 +155,17 @@ insertGenesisP addr balance = [mySetAddr addr, mySetBigInt balance]
 insertGenesis myCon addr balance = do
   print ("gen",addr,toHex balance)
   execute myCon insertGenesisQ (insertGenesisP addr balance) >>= printErr
+
+myTxValue mtx = case mtx of
+  (MyTx blkNum txIdx txHash value gas failed mop) ->
+    insertTxP blkNum txIdx txHash value gas failed mop
+  (MyContractCreation blkNum txIdx fromA contractA) ->
+    insertContractCreationP blkNum txIdx fromA contractA
+  (MyMsgCall blkNum txIdx fromA toA) ->
+    insertMsgCallP blkNum txIdx fromA toA
+  (MyInternalTx blkNum txIdx idx fromA addr opcode) ->
+    insertInternalTxP blkNum txIdx idx fromA addr opcode
+  _ -> error $ "myTxValue: " ++ show mtx
 
 tableInsertMyTxs myCon tblNom colNoms mtxs =
   unless (null mtxs) $ do
@@ -318,10 +369,10 @@ runWeb3 doLog ethUrl f = runWeb3N 1
 
 main :: IO ()
 main = do
-  (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doLog,doTest) <- getOps
+  (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) <- getOps
   if doTest
     then tests myUrl myPort ethUrl iniBlk numBlks doLog
-    else updateDb myUrl myPort ethUrl iniBlk numBlks iniDb
+    else updateDb myUrl myPort ethUrl doPar iniBlk numBlks iniDb
 
 tests myUrl myPort ethUrl iniBlk numBlks doLog = do
   testLongQ myUrl myPort
@@ -429,12 +480,12 @@ filterCreateOp = reverse . fst . foldl filterCreateOp' ([],False)
              in if forestLen == 1 then (head forest:r) else (forest++r)
 
 -- TODO
-updateDb myUrl myPort ethUrl blkIni numBlks iniDb = do
+updateDb myUrl myPort ethUrl doPar blkIni numBlks iniDb = do
   --createDb
   (greet,myCon) <- connectDetail (defConInfo myUrl myPort)
   printErr greet
   when iniDb $ initDb ethUrl myCon
-  dbInsertBlocks blkIni numBlks ethUrl myCon
+  dbInsertBlocks blkIni numBlks ethUrl myCon doPar
   close myCon
 
 dbGetLastBlk :: MySQLConn -> IO BlockNum
@@ -497,11 +548,10 @@ dbInsertBlock0 ethUrl myCon = do
   mapM_ (\acc -> insertGenesis myCon (accAddr acc) (accBalance acc)) accs
 
 -- TODO
-dbInsertBlocks :: BlockNum -> BlockNum -> String -> MySQLConn -> IO ()
-dbInsertBlocks blk numBlks ethUrl myCon = do
-  --blk <- dbGetLastBlk myCon
-  let blks = map (blk+) [0 .. numBlks-1]
-  mapM_ (dbInsertBlock ethUrl myCon) blks
+dbInsertBlocks iniBlk numBlks ethUrl myCon doPar = do
+  --iniBlk <- dbGetLastBlk myCon
+  let blks = map (iniBlk+) [0 .. numBlks-1]
+  mapM_ (dbInsertBlock ethUrl myCon doPar) blks
   --dbInsertLastBlk myCon (last blks)
 
 ignoreCtrlC :: IO a -> IO a
@@ -513,22 +563,22 @@ ignoreCtrlC f = do
   installHandler keyboardSignal oldH Nothing
   return r
 
-dbInsertBlock :: String -> MySQLConn -> BlockNum -> IO ()
-dbInsertBlock ethUrl myCon blkNum = do
+dbInsertBlock ethUrl myCon doPar blkNum = do
   blk <- fromJust . fromRight "eth_getBlockByNumber"
      <$> runWeb3 False ethUrl (eth_getBlockByNumber (RPBNum blkNum) True)
   let mtx = MyBlock blkNum (fromJust $ rebHash blk)
                     (fromJust $ rebMiner blk) (rebDifficulty blk)
                     (rebGasLimit blk)
-  myDbTxs <- mapM (dbInsertTx ethUrl . (\(POObject tx) -> tx)) (getTxs blk)
-  let (!rTx,!rNew,!rCall,!rItx,!rDacc) = spanDbTxs myDbTxs
+  myDbTxs1 <- mapM (dbInsertTx ethUrl . (\(POObject tx) -> tx)) (getTxs blk)
+  let myDbTxs2 = parItxs doPar myDbTxs1
+  let (!rTx,!rNew,!rCall,!rItx,!rDacc) = spanDbTxs (force myDbTxs2)
   ignoreCtrlC $ withTransaction myCon $ do
     dbInsertMyTx myCon mtx
     insertTxs myCon rTx
     insertContractCreations myCon rNew
     insertMsgCalls myCon rCall
     insertInternalTxs myCon rItx
-    mapM_ (dbInsertMyTouchedAccount ethUrl myCon) rDacc
+    mapM_ (dbInsertMyTouchedAccount ethUrl myCon) (nub rDacc)
 
 spanDbTxs = reverseDbTxs . foldl spanMyTxs ([],[],[],[],[])
 reverseDbTxs (rTx,rNew,rCall,rItx,rDacc) =
@@ -547,17 +597,6 @@ spanMyTx (rTx,rNew,rCall,rItx,rDacc) !mtx = case mtx of
   MyMsgCall {} -> (rTx,rNew,mtx:rCall,rItx,rDacc)
   MyInternalTx {} -> (rTx,rNew,rCall,mtx:rItx,rDacc)
   _ -> error $ "spanMyTx: " ++ show mtx
-
-myTxValue mtx = case mtx of
-  (MyTx blkNum txIdx txHash value gas failed mop) ->
-    insertTxP blkNum txIdx txHash value gas failed mop
-  (MyContractCreation blkNum txIdx fromA contractA) ->
-    insertContractCreationP blkNum txIdx fromA contractA
-  (MyMsgCall blkNum txIdx fromA toA) ->
-    insertMsgCallP blkNum txIdx fromA toA
-  (MyInternalTx blkNum txIdx idx fromA addr opcode) ->
-    insertInternalTxP blkNum txIdx idx fromA addr opcode
-  _ -> error $ "myTxValue: " ++ show mtx
 
 dbInsertMyTxs ethUrl myCon (mtxs,mdas) = do
   mapM_ (dbInsertMyTx myCon) mtxs
@@ -580,7 +619,25 @@ nullAddr = (==addr0)
 
 isReservedAddr addr = addr `elem` [addr0,addr1,addr2,addr3,addr4]
 
-dbInsertTx :: String -> RpcEthBlkTx -> IO ([MysqlTx],[MysqlTx])
+parItxs doPar myDbTxs =
+  let mDbItxs1 = map (\(_,_,_,(mtxs,_)) -> mtxs) myDbTxs
+      mDbItxs4 = if doPar
+                    then
+                      let mDbItxs2 = filter (not . null) mDbItxs1
+                          forceList = withStrategy (parList rdeepseq)
+                          mDbItxs3 = map forceList mDbItxs2
+                      in unFilterNull [] mDbItxs1 mDbItxs3
+                    else mDbItxs1
+  in joinDbItxs [] myDbTxs mDbItxs4
+  where
+    unFilterNull r [] _ = reverse r
+    unFilterNull r ([]:mtxss1) mtxs = unFilterNull ([]:r) mtxss1 mtxs
+    unFilterNull r (_:mtxss1) (mtxs2:mtxss2) = unFilterNull (mtxs2:r) mtxss1 mtxss2
+    joinDbItxs r [] [] = reverse r
+    joinDbItxs r ((mtx1,mtx2,mdas2,(_,mdas3)):dbTxs) (mtxs3:dbItxs) =
+      let mdas = if null mdas2 then mdas3 else head mdas2:mdas3
+      in joinDbItxs ((mtx1:mtx2:mtxs3,mdas):r) dbTxs dbItxs
+
 dbInsertTx ethUrl (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto txValue _ txGas _ _ _ _) = do
   txTrace <- getTraceTx ethUrl txHash
   let failed = traceTxFailed txTrace
@@ -602,10 +659,11 @@ dbInsertTx ethUrl (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto tx
       return (mtx,[mda],to)
   let (mtxs3,mdas3) = if not failed
                         then dbInsertInternalTxs
-                                  blkNum txIdx cAddr $ traceTxTree tls
+                                blkNum txIdx cAddr $ traceTxTree tls
                         else ([],[])
-  let mdas = nub $ if null mdas2 then mdas3 else head mdas2:mdas3
-  return (mtx1:mtx2:mtxs3,mdas)
+  --let mdas = if null mdas2 then mdas3 else head mdas2:mdas3
+  --return (mtx1:mtx2:mtxs3,mdas)
+  return (mtx1,mtx2,mdas2,(mtxs3,mdas3))
 
 dbInsertInternalTxs :: BlockNum -> Int
                     -> HexEthAddr -> [Tree RpcTraceLog]
