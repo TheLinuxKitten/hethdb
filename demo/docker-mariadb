@@ -12,7 +12,8 @@ DB_USER_PASSWORD=kitten
 DB_NAME=ethdb
 
 docker_mysql_ip() {
-    docker inspect $DB_CONTAINER_NAME | grep '"IPAddress"' | head -1 | cut -d'"' -f4
+#    docker inspect $DB_CONTAINER_NAME | grep '"IPAddress"' | head -1 | cut -d'"' -f4
+    docker run -it --link ethdb --rm $DB_IMAGE sh -c 'echo $ETHDB_PORT_3306_TCP_ADDR'
 }
 
 docker_mysql_client() {
@@ -44,7 +45,8 @@ docker_mysql_run() {
         -e MYSQL_ROOT_PASSWORD=$DB_ROOT_PASSWORD $DB_IMAGE
 }
 
-[ -z "$1" ] && echo "Uso: $0 {--init|--run|--cli-root|--cli-user}" && exit 1
+[ -z "$1" ] && echo "Uso: $0 {--ip|--init|--run|--cli-root|--cli-user}" && exit 1
+[ "$1" = "--ip" ] && docker_mysql_ip && exit 0
 [ "$1" = "--init" ] && docker_mysql_init && exit 0
 [ "$1" = "--run" ] && docker_mysql_run && exit 0
 [ "$1" = "--cli-root" ] && docker_mysql_client_root && exit 0
