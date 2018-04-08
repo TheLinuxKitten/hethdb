@@ -28,7 +28,7 @@ import qualified Text.Parsec.Text as P
 parseOpcode :: P.Parser Text
 parseOpcode = do
   pos <- (`div` 2) . P.sourceColumn <$> P.getPosition
-  (op:[]) <- BS.unpack . hex2bs <$> parseByteCode
+  [op] <- BS.unpack . hex2bs <$> parseByteCode
   case op of
     0x00 -> returnPos pos "STOP"
     0x01 -> returnPos pos "ADD"
@@ -70,6 +70,8 @@ parseOpcode = do
     0x3a -> returnPos pos "GASPRICE"
     0x3b -> returnPos pos "EXTCODESIZE"
     0x3c -> returnPos pos "EXTCODECOPY"
+    0x3d -> returnPos pos "RETURNDATASIZE"
+    0x3e -> returnPos pos "RETURNDATACOPY"
 
     0x40 -> returnPos pos "BLOCKHASH"
     0x41 -> returnPos pos "COINBASE"
@@ -169,17 +171,20 @@ parseOpcode = do
     0xf2 -> returnPos pos "CALLCODE"
     0xf3 -> returnPos pos "RETURN"
     0xf4 -> returnPos pos "DELEGATECALL"
+    0xfa -> returnPos pos "STATICCALL"
+    0xfd -> returnPos pos "REVERT"
+    0xfe -> returnPos pos "INVALID"
     0xff -> returnPos pos "SUICIDE"
   where
     parseByteCode = T.pack <$> P.count 2 P.hexDigit
     parsePush pos numBytes = do
       codeBytes <- joinHex . T.concat <$> P.count numBytes parseByteCode'
-      returnPos pos $ "PUSH" <> (T.pack $ show numBytes) <> " " <> codeBytes
+      returnPos pos $ "PUSH" <> T.pack (show numBytes) <> " " <> codeBytes
     parseByteCode' = parseByteCode <|> return "00"
-    returnPos pos t = return $ (T.pack $ show pos) <> " " <> t
+    returnPos pos t = return $ T.pack (show pos) <> " " <> t
 
 parseEvmCode :: HexData -> Either Text [Text]
-parseEvmCode = either (Left . T.pack . show) (Right . id)
-             . P.parse ((P.many parseOpcode) <* P.eof) ""
+parseEvmCode = either (Left . T.pack . show) Right
+             . P.parse (P.many parseOpcode <* P.eof) ""
              . stripHex
 

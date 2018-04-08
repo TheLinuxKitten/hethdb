@@ -370,11 +370,14 @@ runWeb3 doLog ethUrl f = runWeb3N 1
 main :: IO ()
 main = do
   (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) <- getOps
-  if doTest
+  updateDb doTest myUrl myPort ethUrl doPar iniBlk numBlks iniDb
+  {-if doTest
     then tests myUrl myPort ethUrl iniBlk numBlks doLog
-    else updateDb myUrl myPort ethUrl doPar iniBlk numBlks iniDb
+    else updateDb doTest myUrl myPort ethUrl doPar iniBlk numBlks iniDb-}
 
 tests myUrl myPort ethUrl iniBlk numBlks doLog = do
+  testLongTrace ethUrl
+  {-
   testLongQ myUrl myPort
   let addr = HexEthAddr "0x6a0a0fc761c612c340a0e98d33b37a75e5268472"
   let nonces = [1..9999]
@@ -385,6 +388,7 @@ tests myUrl myPort ethUrl iniBlk numBlks doLog = do
       <$> runWeb3 False ethUrl (eth_getCode (HexEthAddr "0x6a0a0fc761c612c340a0e98d33b37a75e5268472") RPBLatest)
   mapM_ (putStrLn . T.unpack) $ fromRight "parseEvmCode" $ parseEvmCode code
   testTraceTree doLog ethUrl iniBlk numBlks
+  -}
 
 testLongQ myUrl myPort = do
   (greet,myCon) <- connectDetail (defConInfo myUrl myPort)
@@ -395,6 +399,14 @@ testLongQ myUrl myPort = do
   mapM_ print mVals
   skipToEof iMyValues
   close myCon
+
+testLongTrace ethUrl = do
+  --traceTx <- getTraceTx ethUrl "0x79f03e00803211ae61f7a63c6840aafd3d011252a46dfeb56293e923bca0140d"
+  traceTx <- getTraceTx ethUrl "0xa5080c8060cebd905fd9eac05ddd514a9a7904e770d75f85c5b03c2e1f88ac02"
+  let rLogs = snd $ reduceTraceLogs $ force $ traceValueTxLogs traceTx
+  print rLogs
+  print $ traceTxTree rLogs
+  --print traceTx
 
 contractAddress :: HexEthAddr -> Integer -> HexEthAddr
 contractAddress addr nonce =
@@ -407,6 +419,9 @@ contractAddress addr nonce =
   in HexEthAddr $ toHex $ BS.drop (32-20) $ keccak256 bs
 
 getTxs = sortTxs . rebTransactions
+
+traceLogFromJSON :: Value -> RpcTraceLog
+traceLogFromJSON = (\(Success a) -> a) . fromJSON
 
 testTraceTree :: Bool -> String -> BlockNum -> BlockNum -> IO ()
 testTraceTree doLog ethUrl iniBlk numBlks = do
@@ -422,11 +437,11 @@ testTraceTree doLog ethUrl iniBlk numBlks = do
       let txIdx = fromJust $ btxTransactionIndex tx
       print (blkNum,txIdx)
       traceTx <- getTraceTx ethUrl txH
-      unless (traceTxFailed traceTx) $ do
-        let traceLogs = traceTxLogs traceTx
+      unless (traceValueTxFailed traceTx) $ do
+        let traceLogs = map traceLogFromJSON $ traceValueTxLogs traceTx
         mapM_ (\trL -> do
           let trOp = traceLogOp trL
-          when (testOp trOp) $ putStrLn $ show (toHex blkNum) ++ " " ++ show txIdx ++ " " ++ (show $ traceLogDepth trL) ++ " " ++ (T.unpack trOp) ++ " " ++ (if traceTxFailed traceTx then ("(failed) ") else "") ++ show (map T.unpack $ fromJust $ traceLogStack trL) ++ " " ++ show (traceLogMemory trL)
+          when (testOp trOp) $ putStrLn $ show (toHex blkNum) ++ " " ++ show txIdx ++ " " ++ (show $ traceLogDepth trL) ++ " " ++ (T.unpack trOp) ++ " " ++ (if traceValueTxFailed traceTx then ("(failed) ") else "") ++ show (map T.unpack $ fromJust $ traceLogStack trL) ++ " " ++ show (traceLogMemory trL)
           ) traceLogs
         when (any ((=="CREATE") . traceLogOp) traceLogs) $ do
           let treeTraceLogs = traceTxTree traceLogs
@@ -449,13 +464,14 @@ testTraceTree doLog ethUrl iniBlk numBlks = do
 traceTxTree :: [RpcTraceLog] -> [Tree RpcTraceLog]
 traceTxTree = traceTxTree' [[]] 1
   where
+    traceTxTree' [[]] _ [] = []
     traceTxTree' (forest:[]) _ [] = reverse forest
     traceTxTree' (forest:calls) depth (t@(RpcTraceLog d me _ _ _ op _ _ _):ts)
       | depth == d = traceTxTree' ((Node t []:forest):calls) d ts
-      | depth+1 == d = traceTxTree' ([Node t []]:forest:calls) d ts
-      | depth-1 == d = let (Node tp _:forest') = head calls
-                           calls' = tail calls
-                       in traceTxTree' ((Node t []:Node tp (reverse forest):forest'):calls') d ts
+      | depth < d = traceTxTree' ([Node t []]:forest:calls) d ts
+      | depth > d = let (Node tp _:forest') = head calls
+                        calls' = tail calls
+                    in traceTxTree' ((Node t []:Node tp (reverse forest):forest'):calls') d ts
 
 filterCreateOp :: [Tree RpcTraceLog] -> [(Tree RpcTraceLog,HexEthAddr)]
 filterCreateOp = reverse . fst . foldl filterCreateOp' ([],False)
@@ -480,12 +496,12 @@ filterCreateOp = reverse . fst . foldl filterCreateOp' ([],False)
              in if forestLen == 1 then (head forest:r) else (forest++r)
 
 -- TODO
-updateDb myUrl myPort ethUrl doPar blkIni numBlks iniDb = do
+updateDb doTest myUrl myPort ethUrl doPar blkIni numBlks iniDb = do
   --createDb
   (greet,myCon) <- connectDetail (defConInfo myUrl myPort)
   printErr greet
   when iniDb $ initDb ethUrl myCon
-  dbInsertBlocks blkIni numBlks ethUrl myCon doPar
+  dbInsertBlocks doTest blkIni numBlks ethUrl myCon doPar
   close myCon
 
 dbGetLastBlk :: MySQLConn -> IO BlockNum
@@ -548,10 +564,10 @@ dbInsertBlock0 ethUrl myCon = do
   mapM_ (\acc -> insertGenesis myCon (accAddr acc) (accBalance acc)) accs
 
 -- TODO
-dbInsertBlocks iniBlk numBlks ethUrl myCon doPar = do
+dbInsertBlocks doTest iniBlk numBlks ethUrl myCon doPar = do
   --iniBlk <- dbGetLastBlk myCon
   let blks = map (iniBlk+) [0 .. numBlks-1]
-  mapM_ (dbInsertBlock ethUrl myCon doPar) blks
+  mapM_ (dbInsertBlock doTest ethUrl myCon doPar) blks
   --dbInsertLastBlk myCon (last blks)
 
 ignoreCtrlC :: IO a -> IO a
@@ -563,7 +579,7 @@ ignoreCtrlC f = do
   installHandler keyboardSignal oldH Nothing
   return r
 
-dbInsertBlock ethUrl myCon doPar blkNum = do
+dbInsertBlock doTest ethUrl myCon doPar blkNum = do
   blk <- fromJust . fromRight "eth_getBlockByNumber"
      <$> runWeb3 False ethUrl (eth_getBlockByNumber (RPBNum blkNum) True)
   let mtx = MyBlock blkNum (fromJust $ rebHash blk)
@@ -572,13 +588,25 @@ dbInsertBlock ethUrl myCon doPar blkNum = do
   myDbTxs1 <- mapM (dbInsertTx ethUrl . (\(POObject tx) -> tx)) (getTxs blk)
   let myDbTxs2 = parItxs doPar myDbTxs1
   let (!rTx,!rNew,!rCall,!rItx,!rDacc) = spanDbTxs (force myDbTxs2)
-  ignoreCtrlC $ withTransaction myCon $ do
-    dbInsertMyTx myCon mtx
-    insertTxs myCon rTx
-    insertContractCreations myCon rNew
-    insertMsgCalls myCon rCall
-    insertInternalTxs myCon rItx
-    mapM_ (dbInsertMyTouchedAccount ethUrl myCon) (nub rDacc)
+  if doTest
+    then do
+      print mtx
+      mapM_ (\(POObject tx) -> do
+        txTrace <- getTraceTx ethUrl (btxHash tx)
+        let tls = traceValueTxLogs txTrace
+        let rtls = snd $ reduceTraceLogs tls
+        --print tls
+        print rtls
+        print $ traceTxTree rtls
+        ) (getTxs blk)
+    else do
+      ignoreCtrlC $ withTransaction myCon $ do
+        dbInsertMyTx myCon mtx
+        insertTxs myCon rTx
+        insertContractCreations myCon rNew
+        insertMsgCalls myCon rCall
+        insertInternalTxs myCon rItx
+        mapM_ (dbInsertMyTouchedAccount ethUrl myCon) (nub rDacc)
 
 spanDbTxs = reverseDbTxs . foldl spanMyTxs ([],[],[],[],[])
 reverseDbTxs (rTx,rNew,rCall,rItx,rDacc) =
@@ -640,11 +668,10 @@ parItxs doPar myDbTxs =
 
 dbInsertTx ethUrl (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto txValue _ txGas _ _ _ _) = do
   txTrace <- getTraceTx ethUrl txHash
-  let failed = traceTxFailed txTrace
+  let failed = traceValueTxFailed txTrace
   let (mop,tls) = if failed
                     then (0,[])
-                    else let tls = traceTxLogs txTrace
-                         in (traceLogsMaskOp tls, tls)
+                    else reduceTraceLogs $ traceValueTxLogs txTrace
   let mtx1 = MyTx blkNum txIdx txHash txValue txGas failed mop
   (mtx2,mdas2,cAddr) <- case mto of
     Nothing -> do
@@ -664,6 +691,35 @@ dbInsertTx ethUrl (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto tx
   --let mdas = if null mdas2 then mdas3 else head mdas2:mdas3
   --return (mtx1:mtx2:mtxs3,mdas)
   return (mtx1,mtx2,mdas2,(mtxs3,mdas3))
+
+reduceTraceLogs :: [Value] -> (Word64,[RpcTraceLog])
+reduceTraceLogs values =
+  let (opStrs,rtls) = reduceTraceLogs' ([],[]) values
+  in (traceMaskOps opStrs,rtls)
+  where
+    reduceTraceLogs' (opStrs,rtls) [] = (reverse opStrs, reverse rtls)
+    reduceTraceLogs' (opStrs,rtls) (val:vals) =
+      let tl = traceLogFromJSON val
+          opStr = traceLogOp tl
+          isRl = opStr `elem` reducedOps
+      in reduceTraceLogs' (opStr:opStrs,if isRl then tl:rtls else rtls) vals
+    reducedOps =
+      [ "STOP"
+      , "CALL"
+      , "CALLCODE"
+      , "RETURN"
+      , "DELEGATECALL"
+      , "STATICCALL"
+      , "REVERT"
+      , "INVALID"
+      , "CREATE"
+      , "SELFDESTRUCT"
+      , "BALANCE"
+      , "EXTCODESIZE"
+      , "EXTCODECOPY"
+      , "SLOAD"
+      , "SSTORE"
+      ]
 
 dbInsertInternalTxs :: BlockNum -> Int
                     -> HexEthAddr -> [Tree RpcTraceLog]
@@ -694,6 +750,11 @@ dbInsertInternalTxs blkNum txIdx cAddr treeTraceLogs =
               let (_:to:_) = getStack mstack
                   (to',tch) = stackAddr' to
               in (addr,Just (idx,addr,to',opDelegatecall),tch)
+            "STATICCALL" ->
+              let (_:to:_) = getStack mstack
+                  (to',tch) = stackAddr' to
+              in (to',Just (idx,addr,to',opStaticcall),tch)
+            {- "REVERT" -> -}
             "CREATE" ->
               let t' = rootLabel $ head ts
                   (to:_) = getStack (traceLogStack t')
@@ -731,10 +792,13 @@ dbInsertInternalTxs blkNum txIdx cAddr treeTraceLogs =
       in (addr,tch)
     stackAddr = HexEthAddr . joinHex . T.drop (64-40) . stripHex
 
+opCreate = 0xf0
 opCall = 0xf1
 opCallcode = 0xf2
 opDelegatecall = 0xf4
-opCreate = 0xf0
+opStaticcall = 0xfa
+opRevert = 0xfd
+opInvalid = 0xfe
 opSelfdestruct = 0xff
 
 traceLogsMaskOp :: [RpcTraceLog] -> Word64
@@ -771,7 +835,7 @@ opcodeNoms =
   , ["CALLDATALOAD","CALLDATASIZE","CALLDATACOPY"]
   , ["CODESIZE","CODECOPY"]
   , ["GASPRICE"]
-  , ["EXTCODESIZE","EXTCODECOPY"]
+  , ["EXTCODESIZE","EXTCODECOPY","RETURNDATASIZE","RETURNDATACOPY"]
   , ["BLOCKHASH","NUMBER"]
   , ["COINBASE"]
   , ["TIMESTAMP"]
@@ -794,6 +858,8 @@ opcodeNoms =
   , ["DELEGATECALL"]
   , ["INVALID"]
   , ["SELFDESTRUCT"]
+  , ["STATICCALL"]
+  , ["REVERT"]
   ]
   where
     mapOpIdx op minIdx maxIdx = map ((op<>) . T.pack . show) [minIdx..maxIdx]
@@ -835,9 +901,9 @@ accountNonce myCon addr = (+)
                       <$> selectMsgCallCountFrom myCon addr
                       <*> selectContractCreationCountFrom myCon addr
 
-getTraceTx ethUrl txHash = fromRight "debug_traceTransaction"
+getTraceTx ethUrl txHash = fromRight "debug_traceTransactionValue"
                        <$> runWeb3 False ethUrl
-                            (debug_traceTransaction txHash
+                            (debug_traceTransactionValue txHash
                                   (defaultTraceOptions
                                       { traceOpDisableStorage = True
                                       , traceOpDisableMemory = True
