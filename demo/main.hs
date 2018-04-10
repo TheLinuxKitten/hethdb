@@ -45,7 +45,7 @@ import System.Posix.Signals
 getOps :: IO (String,Integer,String,BlockNum,BlockNum,Bool,Bool,Bool,Bool)
 getOps = do
   prog <- getProgName
-  go prog ("localhost",3306,"http://192.168.122.201:8543",0,100,False,False,False,False) <$> getArgs
+  go prog ("localhost",3306,"http://localhost:8545",1,100,False,False,False,False) <$> getArgs
   where
     go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--myHttp":a:as) = go p (a,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) as
     go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--myPort":a:as) = go p (myUrl,read a,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) as
@@ -702,8 +702,8 @@ reduceTraceLogs values =
     reduceTraceLogs' (ops,rtls) (val:vals) =
       let tl = traceLogFromJSON val
           op = fromText $ traceLogOp tl
-          isRl = op `elem` reducedOps
-      in reduceTraceLogs' (op:ops,if isRl then tl:rtls else rtls) vals
+          isRtl = op `elem` reducedOps
+      in reduceTraceLogs' (op:ops,if isRtl then tl:rtls else rtls) vals
     reducedOps =
       [ OpSTOP
       , OpCALL
