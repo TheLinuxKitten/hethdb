@@ -22,6 +22,7 @@ import Control.Parallel.Strategies (parList,rdeepseq,withStrategy)
 import Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
+import Data.Ethereum.EvmOp
 import Data.Maybe (fromJust, isJust)
 import Data.List (nub)
 import Data.Monoid ((<>))
@@ -587,7 +588,7 @@ dbInsertBlock doTest ethUrl myCon doPar blkNum = do
                     (rebGasLimit blk)
   myDbTxs1 <- mapM (dbInsertTx ethUrl . (\(POObject tx) -> tx)) (getTxs blk)
   let myDbTxs2 = parItxs doPar myDbTxs1
-  let (!rTx,!rNew,!rCall,!rItx,!rDacc) = spanDbTxs (force myDbTxs2)
+  let (!rTx,!rNew,!rCall,!rItx,!rDacc) = spanDbTxs myDbTxs2
   if doTest
     then do
       print mtx
@@ -619,7 +620,7 @@ reverseDbTxs (rTx,rNew,rCall,rItx,rDacc) =
 spanMyTxs r@(rTx,rNew,rCall,rItx,rDacc) (mtxs,mdas) =
   let (rTx',rNew',rCall',rItx',_) = foldl spanMyTx r mtxs
   in (rTx',rNew',rCall',rItx',rDacc++mdas)
-spanMyTx (rTx,rNew,rCall,rItx,rDacc) !mtx = case mtx of
+spanMyTx (rTx,rNew,rCall,rItx,rDacc) mtx = case mtx of
   MyTx {} -> (mtx:rTx,rNew,rCall,rItx,rDacc)
   MyContractCreation {} -> (rTx,mtx:rNew,rCall,rItx,rDacc)
   MyMsgCall {} -> (rTx,rNew,mtx:rCall,rItx,rDacc)
@@ -694,31 +695,31 @@ dbInsertTx ethUrl (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto tx
 
 reduceTraceLogs :: [Value] -> (Word64,[RpcTraceLog])
 reduceTraceLogs values =
-  let (opStrs,rtls) = reduceTraceLogs' ([],[]) values
-  in (traceMaskOps opStrs,rtls)
+  let (ops,rtls) = reduceTraceLogs' ([],[]) values
+  in (traceMaskOps ops,rtls)
   where
-    reduceTraceLogs' (opStrs,rtls) [] = (reverse opStrs, reverse rtls)
-    reduceTraceLogs' (opStrs,rtls) (val:vals) =
+    reduceTraceLogs' (ops,rtls) [] = (reverse ops, reverse rtls)
+    reduceTraceLogs' (ops,rtls) (val:vals) =
       let tl = traceLogFromJSON val
-          opStr = traceLogOp tl
-          isRl = opStr `elem` reducedOps
-      in reduceTraceLogs' (opStr:opStrs,if isRl then tl:rtls else rtls) vals
+          op = fromText $ traceLogOp tl
+          isRl = op `elem` reducedOps
+      in reduceTraceLogs' (op:ops,if isRl then tl:rtls else rtls) vals
     reducedOps =
-      [ "STOP"
-      , "CALL"
-      , "CALLCODE"
-      , "RETURN"
-      , "DELEGATECALL"
-      , "STATICCALL"
-      , "REVERT"
-      , "INVALID"
-      , "CREATE"
-      , "SELFDESTRUCT"
-      , "BALANCE"
-      , "EXTCODESIZE"
-      , "EXTCODECOPY"
-      , "SLOAD"
-      , "SSTORE"
+      [ OpSTOP
+      , OpCALL
+      , OpCALLCODE
+      , OpRETURN
+      , OpDELEGATECALL
+      , OpSTATICCALL
+      , OpREVERT
+      , OpINVALID
+      , OpCREATE
+      , OpSELFDESTRUCT
+      , OpBALANCE
+      , OpEXTCODESIZE
+      , OpEXTCODECOPY
+      , OpSLOAD
+      , OpSSTORE
       ]
 
 dbInsertInternalTxs :: BlockNum -> Int
@@ -736,48 +737,49 @@ dbInsertInternalTxs blkNum txIdx cAddr treeTraceLogs =
       MyInternalTx blkNum txIdx idx from to opcode
     getItxs idx addr forest = foldl getItx ([],[],idx,addr,forest) forest
     getItx (r,tchs,idx,addr,_:ts) t =
-      let (RpcTraceLog _ _ _ _ _ op _ mstack _) = rootLabel t
+      let (RpcTraceLog _ _ _ _ _ opStr _ mstack _) = rootLabel t
+          op = fromText opStr
           (addr',itx,tch) = case op of
-            "CALL" ->
+            OpCALL ->
               let (_:to:_) = getStack mstack
                   (to',tch) = stackAddr' to
               in (to',Just (idx,addr,to',opCall),tch)
-            "CALLCODE" ->
+            OpCALLCODE ->
               let (_:to:_) = getStack mstack
                   (to',tch) = stackAddr' to
               in (addr,Just (idx,addr,to',opCallcode),tch)
-            "DELEGATECALL" ->
+            OpDELEGATECALL ->
               let (_:to:_) = getStack mstack
                   (to',tch) = stackAddr' to
               in (addr,Just (idx,addr,to',opDelegatecall),tch)
-            "STATICCALL" ->
+            OpSTATICCALL ->
               let (_:to:_) = getStack mstack
                   (to',tch) = stackAddr' to
               in (to',Just (idx,addr,to',opStaticcall),tch)
-            {- "REVERT" -> -}
-            "CREATE" ->
+            {- OpREVERT -> -}
+            OpCREATE ->
               let t' = rootLabel $ head ts
                   (to:_) = getStack (traceLogStack t')
                   (to',_) = stackAddr' to
               in (to',Just (idx,addr,to',opCreate),Nothing)
-            "SELFDESTRUCT" ->
+            OpSELFDESTRUCT ->
               let (to:_) = getStack mstack
                   (to',tch) = stackAddr' to
               in (addr,Just (idx,addr,to',opSelfdestruct),tch)
-            "BALANCE" ->
+            OpBALANCE ->
               let (acc:_) = getStack mstack
                   (_,tch) = stackAddr' acc
               in (addr,Nothing,tch)
-            "EXTCODESIZE" ->
+            OpEXTCODESIZE ->
               let (acc:_) = getStack mstack
                   (_,tch) = stackAddr' acc
               in (addr,Nothing,tch)
-            "EXTCODECOPY" ->
+            OpEXTCODECOPY ->
               let (acc:_) = getStack mstack
                   (_,tch) = stackAddr' acc
               in (addr,Nothing,tch)
-            "SLOAD" -> (addr,Nothing,Just addr)
-            "SSTORE" -> (addr,Nothing,Just addr)
+            OpSLOAD -> (addr,Nothing,Just addr)
+            OpSSTORE -> (addr,Nothing,Just addr)
             _ -> (addr,Nothing,Nothing)
           (fItxs,fTchs,nIdx,_,_) = getItxs (idx+1) addr' (subForest t)
           r' = concatRs fItxs (itx:r)
@@ -792,19 +794,19 @@ dbInsertInternalTxs blkNum txIdx cAddr treeTraceLogs =
       in (addr,tch)
     stackAddr = HexEthAddr . joinHex . T.drop (64-40) . stripHex
 
-opCreate = 0xf0
-opCall = 0xf1
-opCallcode = 0xf2
-opDelegatecall = 0xf4
-opStaticcall = 0xfa
-opRevert = 0xfd
-opInvalid = 0xfe
-opSelfdestruct = 0xff
+opCreate = toOpcode OpCREATE
+opCall = toOpcode OpCALL
+opCallcode = toOpcode OpCALLCODE
+opDelegatecall = toOpcode OpDELEGATECALL
+opStaticcall = toOpcode OpSTATICCALL
+opRevert = toOpcode OpREVERT
+opInvalid = toOpcode OpINVALID
+opSelfdestruct = toOpcode OpSELFDESTRUCT
 
 traceLogsMaskOp :: [RpcTraceLog] -> Word64
-traceLogsMaskOp = traceMaskOps . map traceLogOp
+traceLogsMaskOp = traceMaskOps . map (fromText . traceLogOp)
 
-traceMaskOps :: [Text] -> Word64
+traceMaskOps :: [EvmOp] -> Word64
 traceMaskOps = fst . foldl traceMaskOp (0,opcodeMap)
   where
     traceMaskOp (r,opMap) op =
@@ -818,51 +820,51 @@ traceMaskOps = fst . foldl traceMaskOp (0,opcodeMap)
                               else (opms1,opm:opms2)
       in partitionOpMap (opms1',opms2') op opms
 
-maskGetOps :: Word64 -> [[Text]]
+maskGetOps :: Word64 -> [[EvmOp]]
 maskGetOps mop = map fst $ filter (\(_,m) -> (m .&. mop) /= 0) opcodeMap
 
-opcodeMap = zip opcodeNoms (map bit [0..63])
-opcodeNoms =
-  [ ["STOP"]
-  , ["ADD", "MUL", "SUB", "DIV", "SDIV", "MOD", "SMOD", "ADDMOD", "MULMOD", "EXP", "SIGNEXTEND"]
-  , ["LT", "GT", "SLT", "SGT", "EQ", "ISZERO", "AND", "OR", "XOR", "NOT", "BYTE"]
-  , ["SHA3"]
-  , ["ADDRESS"]
-  , ["BALANCE"]
-  , ["ORIGIN"]
-  , ["CALLER"]
-  , ["CALLVALUE"]
-  , ["CALLDATALOAD","CALLDATASIZE","CALLDATACOPY"]
-  , ["CODESIZE","CODECOPY"]
-  , ["GASPRICE"]
-  , ["EXTCODESIZE","EXTCODECOPY","RETURNDATASIZE","RETURNDATACOPY"]
-  , ["BLOCKHASH","NUMBER"]
-  , ["COINBASE"]
-  , ["TIMESTAMP"]
-  , ["DIFFICULTY"]
-  , ["GASLIMIT"]
-  , ["POP"]
-  , ["MLOAD","MSTORE","MSTORE8"]
-  , ["SLOAD"]
-  , ["SSTORE"]
-  , ["JUMP","JUMPI","JUMPDEST"]
-  , ["PC","MSIZE","GAS"]
-  , mapOpIdx "PUSH" 1 32
-  , mapOpIdx "DUP" 1 16
-  , mapOpIdx "SWAP" 1 16
-  , mapOpIdx "LOG" 0 4
-  , ["CREATE"]
-  , ["CALL"]
-  , ["CALLCODE"]
-  , ["RETURN"]
-  , ["DELEGATECALL"]
-  , ["INVALID"]
-  , ["SELFDESTRUCT"]
-  , ["STATICCALL"]
-  , ["REVERT"]
+opcodeMap = zip opcodes (map bit [0..63])
+opcodes =
+  [ [OpSTOP]
+  , [OpADD, OpMUL, OpSUB, OpDIV, OpSDIV, OpMOD, OpSMOD, OpADDMOD, OpMULMOD, OpEXP, OpSIGNEXTEND]
+  , [OpLT, OpGT, OpSLT, OpSGT, OpEQ, OpISZERO, OpAND, OpOR, OpXOR, OpNOT, OpBYTE]
+  , [OpSHA3]
+  , [OpADDRESS]
+  , [OpBALANCE]
+  , [OpORIGIN]
+  , [OpCALLER]
+  , [OpCALLVALUE]
+  , [OpCALLDATALOAD, OpCALLDATASIZE, OpCALLDATACOPY]
+  , [OpCODESIZE, OpCODECOPY]
+  , [OpGASPRICE]
+  , [OpEXTCODESIZE, OpEXTCODECOPY, OpRETURNDATASIZE, OpRETURNDATACOPY]
+  , [OpBLOCKHASH, OpNUMBER]
+  , [OpCOINBASE]
+  , [OpTIMESTAMP]
+  , [OpDIFFICULTY]
+  , [OpGASLIMIT]
+  , [OpPOP]
+  , [OpMLOAD, OpMSTORE, OpMSTORE8]
+  , [OpSLOAD]
+  , [OpSSTORE]
+  , [OpJUMP, OpJUMPI, OpJUMPDEST]
+  , [OpPC, OpMSIZE, OpGAS]
+  , mapOpIdx OpPUSH 1 32
+  , mapOpIdx OpDUP 1 16
+  , mapOpIdx OpSWAP 1 16
+  , mapOpIdx OpLOG 0 4
+  , [OpCREATE]
+  , [OpCALL]
+  , [OpCALLCODE]
+  , [OpRETURN]
+  , [OpDELEGATECALL]
+  , [OpINVALID]
+  , [OpSELFDESTRUCT]
+  , [OpSTATICCALL]
+  , [OpREVERT]
   ]
   where
-    mapOpIdx op minIdx maxIdx = map ((op<>) . T.pack . show) [minIdx..maxIdx]
+    mapOpIdx op minIdx maxIdx = map op [minIdx..maxIdx]
 
 dbInsertMyTouchedAccount ethUrl myCon mtx = case mtx of
   (MyTouchedAccount blkNum txIdx addr) -> do
