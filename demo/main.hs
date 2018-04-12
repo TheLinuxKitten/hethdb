@@ -669,10 +669,11 @@ parItxs doPar myDbTxs =
 
 dbInsertTx ethUrl (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto txValue _ txGas _ _ _ _) = do
   txTrace <- getTraceTx ethUrl txHash
-  let failed = traceValueTxFailed txTrace
-  let (mop,tls) = if failed
+  let failed1 = traceValueTxFailed txTrace
+  let (mop,tls) = if failed1
                     then (0,[])
                     else reduceTraceLogs $ traceValueTxLogs txTrace
+  let failed = failed1 || hasOpInvalid mop
   let mtx1 = MyTx blkNum txIdx txHash txValue txGas failed mop
   (mtx2,mdas2,cAddr) <- case mto of
     Nothing -> do
@@ -802,6 +803,8 @@ opStaticcall = toOpcode OpSTATICCALL
 opRevert = toOpcode OpREVERT
 opInvalid = toOpcode OpINVALID
 opSelfdestruct = toOpcode OpSELFDESTRUCT
+
+hasOpInvalid = (/=0) . (traceMaskOps [OpINVALID] .&.)
 
 traceLogsMaskOp :: [RpcTraceLog] -> Word64
 traceLogsMaskOp = traceMaskOps . map (fromText . traceLogOp)

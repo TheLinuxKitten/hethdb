@@ -232,6 +232,7 @@ fromText op = case op of
   "INVALID" -> OpINVALID
   "SELFDESTRUCT" -> OpSELFDESTRUCT
   "SUICIDE" -> OpSELFDESTRUCT
+  _ -> OpINVALID
 
 toText :: EvmOp -> Text
 toText op = case op of
