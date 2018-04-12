@@ -588,7 +588,7 @@ dbInsertBlock doTest ethUrl myCon doPar blkNum = do
                     (rebGasLimit blk)
   myDbTxs1 <- mapM (dbInsertTx ethUrl . (\(POObject tx) -> tx)) (getTxs blk)
   let myDbTxs2 = parItxs doPar myDbTxs1
-  let (!rTx,!rNew,!rCall,!rItx,!rDacc) = spanDbTxs myDbTxs2
+  let (!rTx,!rNew,!rCall,!rItx,!rDacc) = force (spanDbTxs myDbTxs2)
   if doTest
     then do
       print mtx
