@@ -349,13 +349,6 @@ selectDeadAccountAddr myCon addr = do
   mVals <- myReadAndSkipToEof isValues
   return ((\vals -> if null vals then Nothing else Just (head vals)) <$> mVals)
 
-createLastBlkQ = "create table lastBlk (blkNum integer unsigned not null, primary key (blkNum));"
-insertLastBlkQ = "insert into lastBlk (blkNum) value (?);"
-lastBlkP blkNum = [mySetBlkNum blkNum]
-selectLastBlkQ = "select blkNum from lastBlk order by blkNum desc limit 1;"
-readLastBlk isValues = myGetNum . head . fromJust
-                   <$> myReadAndSkipToEof isValues
-
 runWeb3 doLog ethUrl f = runWeb3N 1
   where
     runWeb3N n = do
@@ -429,44 +422,6 @@ getTxs = sortTxs . rebTransactions
 traceLogFromJSON :: Value -> RpcTraceLog
 traceLogFromJSON = (\(Success a) -> a) . fromJSON
 
-testTraceTree :: Bool -> String -> BlockNum -> BlockNum -> IO ()
-testTraceTree doLog ethUrl iniBlk numBlks = do
-  hSetBuffering stdout NoBuffering
-  hSetBuffering stderr NoBuffering
-  let blks = map (iniBlk+) [0 .. numBlks-1]
-  mapM_ (\blkNum -> do
-    blk <- fromJust . fromRight "eth_getBlockByNumber"
-       <$> runWeb3 doLog ethUrl (eth_getBlockByNumber (RPBNum blkNum) True)
-    let txs = getTxs blk
-    mapM_ (\(POObject tx) -> do
-      let txH = btxHash tx
-      let txIdx = fromJust $ btxTransactionIndex tx
-      print (blkNum,txIdx)
-      traceTx <- getTraceTx ethUrl txH
-      unless (traceValueTxFailed traceTx) $ do
-        let traceLogs = map traceLogFromJSON $ traceValueTxLogs traceTx
-        mapM_ (\trL -> do
-          let trOp = traceLogOp trL
-          when (testOp trOp) $ putStrLn $ show (toHex blkNum) ++ " " ++ show txIdx ++ " " ++ (show $ traceLogDepth trL) ++ " " ++ (T.unpack trOp) ++ " " ++ (if traceValueTxFailed traceTx then ("(failed) ") else "") ++ show (map T.unpack $ fromJust $ traceLogStack trL) ++ " " ++ show (traceLogMemory trL)
-          ) traceLogs
-        when (any ((=="CREATE") . traceLogOp) traceLogs) $ do
-          let treeTraceLogs = traceTxTree traceLogs
-          -- putStrLnErr $ drawForest $ map (fmap show) $ treeTraceLogs
-          mapM_ (print . snd) $ filterCreateOp treeTraceLogs
-      ) txs
-    ) blks
-  where
-    testOp trOp = case trOp of
-      "CREATE" -> True
-      "CALL" -> False
-      "CALLCODE" -> True
-      "DELEGATECALL" -> True
-      "STATICCALL" -> True
-      "REVERT" -> True
-      "INVALID" -> True
-      "SELFDESTRUCT" -> True
-      _ -> False
-
 traceTxTree :: [RpcTraceLog] -> [Tree RpcTraceLog]
 traceTxTree = traceTxTree' [[]] 1
   where
@@ -479,28 +434,6 @@ traceTxTree = traceTxTree' [[]] 1
                         calls' = tail calls
                     in traceTxTree' ((Node t []:Node tp (reverse forest):forest'):calls') d ts
 
-filterCreateOp :: [Tree RpcTraceLog] -> [(Tree RpcTraceLog,HexEthAddr)]
-filterCreateOp = reverse . fst . foldl filterCreateOp' ([],False)
-  where
-    filterCreateOp' (r,popVal) n@(Node t@(RpcTraceLog _ me _ _ _ op _ (Just stack) _) forest)
-      | not popVal =
-          let forestCreateOps = filterCreateOp forest
-          in case op of
-            "CREATE" -> (appendOps (Just (n,addr0)) forestCreateOps r,True)
-            _ -> (appendOps Nothing forestCreateOps r,popVal)
-      | popVal =
-          let (n',_) = head r
-              r' = tail r
-              forestCreateOps = filterCreateOp forest
-          in (appendOps (Just (n',popAddr stack)) forestCreateOps r',False)
-    popAddr = HexEthAddr . toHex . BS.drop (32-20) . fromHex . last
-    appendOps mop forestOps r =
-      if null forestOps
-        then maybe r (:r) mop
-        else let forest = maybe forestOps (:forestOps) mop
-                 forestLen = length forest
-             in if forestLen == 1 then (head forest:r) else (forest++r)
-
 -- TODO
 updateDb doTest myUrl myPort ethUrl doPar mIniBlk numBlks iniDb = do
   --createDb
@@ -510,19 +443,10 @@ updateDb doTest myUrl myPort ethUrl doPar mIniBlk numBlks iniDb = do
   dbInsertBlocks doTest mIniBlk numBlks ethUrl myCon doPar
   close myCon
 
-dbGetLastBlk :: MySQLConn -> IO BlockNum
-dbGetLastBlk myCon = do
-  (colDefs,isValues) <- query_ myCon selectLastBlkQ
-  readLastBlk isValues
-
-dbInsertLastBlk :: MySQLConn -> BlockNum -> IO ()
-dbInsertLastBlk myCon blkNum = execute myCon insertLastBlkQ (lastBlkP blkNum) >>= printErr >> return ()
-
 initDb :: String -> MySQLConn -> IO ()
 initDb ethUrl myCon = do
   dbCreateTables myCon
   dbInsertBlock0 ethUrl myCon
-  dbInsertLastBlk myCon 0
 
 fromRight _ (Right r) = r
 fromRight t (Left e) = error $ show t ++ ": " ++ show e
@@ -604,7 +528,7 @@ dbInsertBlock doTest ethUrl myCon doPar blkNum = do
         print rtls
         print $ traceTxTree rtls
         ) (getTxs blk)
-    else do
+    else
       ignoreCtrlC $ withTransaction myCon $ do
         dbInsertMyTx myCon mtx
         insertTxs myCon rTx
@@ -818,11 +742,11 @@ traceMaskOps = fst . foldl traceMaskOp (0,opcodeMap)
   where
     traceMaskOp (r,opMap) op =
       let (opms,opMap') = partitionOpMap ([],[]) op opMap
-          r' = if null opms then r else r .|. (snd $ head opms)
+          r' = if null opms then r else r .|. snd (head opms)
       in (r', opMap')
     partitionOpMap (opms1,opms2) _ [] = (reverse opms1, reverse opms2)
     partitionOpMap (opms1,opms2) op (opm:opms) =
-      let (opms1',opms2') = if op `elem` (fst opm)
+      let (opms1',opms2') = if op `elem` fst opm
                               then (opm:opms1,opms2)
                               else (opms1,opm:opms2)
       in partitionOpMap (opms1',opms2') op opms
@@ -894,7 +818,7 @@ isEmptyAccount ethUrl myCon blkNum txIdx addr = do
   if balance /= 0
     then return False
     else do
-      hasCode <- not . (=="0x") . fromRight "eth_getCode"
+      hasCode <- (/="0x") . fromRight "eth_getCode"
              <$> runWeb3 False ethUrl (eth_getCode addr $ RPBNum blkNum)
       if hasCode
         then return False
@@ -941,12 +865,12 @@ dbCreateTables myCon = do
 createDb :: IO ()
 createDb = do
   (greet,myCon) <- connectDetail rootConInfo
-  putStrLn $ show greet
+  print greet
   --command myCon (COM_INIT_DB "ethdb") >>= putStrLn . show
-  execute_ myCon "create database `ethdb`;" >>= putStrLn . show
-  execute_ myCon "create user 'kitten' identified by 'kitten';" >>= putStrLn . show
-  execute_ myCon "grant usage on *.* to 'kitten'@'%' identified by 'kitten';" >>= putStrLn . show
-  execute_ myCon "grant all privileges on `ethdb`.* to 'kitten'@'%';" >>= putStrLn . show
-  execute_ myCon "flush privileges;" >>= putStrLn . show
+  execute_ myCon "create database `ethdb`;" >>= print
+  execute_ myCon "create user 'kitten' identified by 'kitten';" >>= print
+  execute_ myCon "grant usage on *.* to 'kitten'@'%' identified by 'kitten';" >>= print
+  execute_ myCon "grant all privileges on `ethdb`.* to 'kitten'@'%';" >>= print
+  execute_ myCon "flush privileges;" >>= print
   close myCon
 
