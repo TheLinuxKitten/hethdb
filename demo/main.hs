@@ -42,20 +42,20 @@ import System.IO (BufferMode(..),hPrint,hPutStrLn,hSetBuffering,stderr,stdout)
 import qualified System.IO.Streams as IOS
 import System.Posix.Signals
 
-getOps :: IO (String,Integer,String,BlockNum,BlockNum,Bool,Bool,Bool,Bool)
+getOps :: IO (String,Integer,String,Maybe BlockNum,BlockNum,Bool,Bool,Bool,Bool)
 getOps = do
   prog <- getProgName
-  go prog ("localhost",3306,"http://localhost:8545",1,100,False,False,False,False) <$> getArgs
+  go prog ("localhost",3306,"http://localhost:8545",Nothing,100,False,False,False,False) <$> getArgs
   where
-    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--myHttp":a:as) = go p (a,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--myPort":a:as) = go p (myUrl,read a,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--ethHttp":a:as) = go p (myUrl,myPort,a,iniBlk,numBlks,iniDb,doPar,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--iniBlk":a:as) = go p (myUrl,myPort,ethUrl, read a, numBlks, iniDb,doPar,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--numBlks":a:as) = go p (myUrl,myPort,ethUrl, iniBlk,read a,iniDb,doPar,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--initDb":as) = go p (myUrl,myPort,ethUrl, iniBlk,numBlks, True,doPar,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--par":as) = go p (myUrl,myPort,ethUrl, iniBlk,numBlks, iniDb,True,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--log":as) = go p (myUrl,myPort,ethUrl, iniBlk,numBlks, iniDb,doPar,True,doTest) as
-    go p (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--test":as) = go p (myUrl,myPort,ethUrl, iniBlk,numBlks, iniDb,doPar,doLog,True) as
+    go p (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--myHttp":a:as) = go p (a,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--myPort":a:as) = go p (myUrl,read a,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--ethHttp":a:as) = go p (myUrl,myPort,a,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--iniBlk":a:as) = go p (myUrl,myPort,ethUrl,Just $ read a, numBlks, iniDb,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--numBlks":a:as) = go p (myUrl,myPort,ethUrl,mIniBlk,read a,iniDb,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--initDb":as) = go p (myUrl,myPort,ethUrl,mIniBlk,numBlks, True,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--par":as) = go p (myUrl,myPort,ethUrl,mIniBlk,numBlks, iniDb,True,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--log":as) = go p (myUrl,myPort,ethUrl,mIniBlk,numBlks, iniDb,doPar,True,doTest) as
+    go p (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--test":as) = go p (myUrl,myPort,ethUrl,mIniBlk,numBlks, iniDb,doPar,doLog,True) as
     go p _ ("-h":as) = msgUso p
     go p _ ("--help":as) = msgUso p
     go _ r [] = r
@@ -201,6 +201,11 @@ insertBlock myCon blkNum blkHash miner difficulty gasLimit = do
   print ("blk", blkNum, blkHash, miner, difficulty, gasLimit)
   execute myCon insertBlockQ (insertBlockP blkNum blkHash miner difficulty gasLimit) >>= printErr
 insertBlocks myCon = tableInsertMyTxs myCon "blocks" ["blkNum","blkHash","miner","difficulty","gasLimit"]
+selectLatestBlockQ = "select blkNum from blocks order by blkNum desc limit 1;"
+selectLatestBlock myCon = do
+  (colDefs,isValues) <- query_ myCon selectLatestBlockQ
+  myGetNum . head . fromJust <$> myReadAndSkipToEof isValues
+
 
 createTableTxsQ = "create table txs (blkNum integer unsigned not null, txIdx smallint unsigned not null, txHash binary(32) not null, txValue binary(32) not null, gas integer unsigned not null, failed boolean not null, maskOpcodes bit(64) not null, primary key (blkNum,txIdx));"
 createIndexTxHashQ = "create index txHash on txs (txHash);"
@@ -370,8 +375,8 @@ runWeb3 doLog ethUrl f = runWeb3N 1
 
 main :: IO ()
 main = do
-  (myUrl,myPort,ethUrl,iniBlk,numBlks,iniDb,doPar,doLog,doTest) <- getOps
-  updateDb doTest myUrl myPort ethUrl doPar iniBlk numBlks iniDb
+  (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) <- getOps
+  updateDb doTest myUrl myPort ethUrl doPar mIniBlk numBlks iniDb
   {-if doTest
     then tests myUrl myPort ethUrl iniBlk numBlks doLog
     else updateDb doTest myUrl myPort ethUrl doPar iniBlk numBlks iniDb-}
@@ -497,12 +502,12 @@ filterCreateOp = reverse . fst . foldl filterCreateOp' ([],False)
              in if forestLen == 1 then (head forest:r) else (forest++r)
 
 -- TODO
-updateDb doTest myUrl myPort ethUrl doPar blkIni numBlks iniDb = do
+updateDb doTest myUrl myPort ethUrl doPar mIniBlk numBlks iniDb = do
   --createDb
   (greet,myCon) <- connectDetail (defConInfo myUrl myPort)
   printErr greet
   when iniDb $ initDb ethUrl myCon
-  dbInsertBlocks doTest blkIni numBlks ethUrl myCon doPar
+  dbInsertBlocks doTest mIniBlk numBlks ethUrl myCon doPar
   close myCon
 
 dbGetLastBlk :: MySQLConn -> IO BlockNum
@@ -565,11 +570,10 @@ dbInsertBlock0 ethUrl myCon = do
   mapM_ (\acc -> insertGenesis myCon (accAddr acc) (accBalance acc)) accs
 
 -- TODO
-dbInsertBlocks doTest iniBlk numBlks ethUrl myCon doPar = do
-  --iniBlk <- dbGetLastBlk myCon
+dbInsertBlocks doTest mIniBlk numBlks ethUrl myCon doPar = do
+  iniBlk <- maybe ((+1) <$> selectLatestBlock myCon) return mIniBlk
   let blks = map (iniBlk+) [0 .. numBlks-1]
   mapM_ (dbInsertBlock doTest ethUrl myCon doPar) blks
-  --dbInsertLastBlk myCon (last blks)
 
 ignoreCtrlC :: IO a -> IO a
 ignoreCtrlC f = do
