@@ -15,7 +15,7 @@ En cualquier momento se puede detener la aplicación pulsando `Ctrl+C`.
   [--myPort <puerto>]               Puerto de la instancia MySQL (3306)
   [--ethHttp <url>]                 URL del nodo geth (http://localhost:8545)
   [--initDb]                        Inicializa (crea) la base de datos MySQL (OFF)
-  [--iniBlk <num>]                  Bloque de inicio del proceso (1)
+  [--iniBlk <num>]                  Bloque de inicio del proceso (último bloque más 1)
   [--numBlks <num>]                 Nro de bloques a procesar (100)
   [--par]                           Analiza los traces, de las transacciones de
                                     un bloque, en paralelo (OFF)
