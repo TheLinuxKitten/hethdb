@@ -188,7 +188,10 @@ insertBlocks myCon = tableInsertMyTxs myCon "blocks" ["blkNum","blkHash","miner"
 selectLatestBlockQ = "select blkNum from blocks order by blkNum desc limit 1;"
 dbSelectLatestBlockNum myCon = do
   (colDefs,isValues) <- query_ myCon selectLatestBlockQ
-  myGetNum . head . fromJust <$> myReadAndSkipToEof isValues
+  resp <- fromJust <$> myReadAndSkipToEof isValues
+  return $ case resp of
+    [] -> Nothing
+    [val] -> Just (myGetNum val)
 
 
 createTableTxsQ = "create table txs (blkNum integer unsigned not null, txIdx smallint unsigned not null, txHash binary(32) not null, txValue binary(32) not null, gas integer unsigned not null, failed boolean not null, maskOpcodes bit(64) not null, primary key (blkNum,txIdx));"

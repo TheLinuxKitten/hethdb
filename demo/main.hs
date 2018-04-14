@@ -187,7 +187,7 @@ insertBlockGenesis ethUrl myCon = do
   mapM_ (\acc -> dbInsertGenesis myCon (accAddr acc) (accBalance acc)) accs
 
 insertBlocksDb doTest mIniBlk numBlks ethUrl myCon doPar = do
-  iniBlk <- maybe ((+1) <$> dbSelectLatestBlockNum myCon) return mIniBlk
+  iniBlk <- maybe (maybe 1 (+1) <$> dbSelectLatestBlockNum myCon) return mIniBlk
   let blks = map (iniBlk+) [0 .. numBlks-1]
   mapM_ (insertBlockDb doTest ethUrl myCon doPar) blks
 
