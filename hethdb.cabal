@@ -12,11 +12,17 @@ cabal-version:       >=1.10
 
 library
   exposed-modules:     Data.Ethereum.RLP
+                     , Data.Ethereum.EthProto
                      , Data.Ethereum.EvmOp
                      , Data.Ethereum.EvmDisasm
+                     , Database.MySQL.Ethereum.DB
   build-depends:       base >=4 && <5
                      , bytestring
+                     , deepseq
+                     , hethdapp
                      , hethrpc
+                     , io-streams
+                     , mysql-haskell
                      , parsec
                      , text
   ghc-options:       -ddump-splices
