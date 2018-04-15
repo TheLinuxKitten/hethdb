@@ -276,7 +276,7 @@ getDbTx ethUrl (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto txVal
   let (mop,tls) = if failed1
                     then (0,[])
                     else reduceTraceLogs $ traceValueTxLogs txTrace
-  let failed = failed1 || hasOpInvalid mop
+  let failed = failed1 || mop `hasOp` OpINVALID
   let mtx1 = MyTx blkNum txIdx txHash txValue txGas failed mop
   (mtx2,mdas2,cAddr) <- case mto of
     Nothing -> do
@@ -289,7 +289,7 @@ getDbTx ethUrl (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto txVal
       let mtx = MyMsgCall blkNum txIdx from to
       let mda = MyTouchedAccount blkNum txIdx to
       return (mtx,[mda],to)
-  let (mtxs3,mdas3) = if not failed
+  let (mtxs3,mdas3) = if not failed && not (mop `hasOp` OpREVERT)
                         then getDbInternalTxs
                                 blkNum txIdx cAddr $ traceTxTree tls
                         else ([],[])
@@ -405,8 +405,6 @@ opStaticcall = toOpcode OpSTATICCALL
 opRevert = toOpcode OpREVERT
 opInvalid = toOpcode OpINVALID
 opSelfdestruct = toOpcode OpSELFDESTRUCT
-
-hasOpInvalid = (/=0) . (traceMaskOps [OpINVALID] .&.)
 
 insertMyTouchedAccountDb ethUrl myCon mtx = case mtx of
   (MyTouchedAccount blkNum txIdx addr) -> do

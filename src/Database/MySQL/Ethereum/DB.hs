@@ -29,6 +29,7 @@ module Database.MySQL.Ethereum.DB
   , dbInsertDeadAccount
   , dbSelectDeadAccountAddr
   , traceLogsMaskOp
+  , hasOp
   , traceMaskOps
   , maskGetOps
   ) where
@@ -356,6 +357,8 @@ dbInsertMyTx myCon mtx = case mtx of
 
 traceLogsMaskOp :: [RpcTraceLog] -> Word64
 traceLogsMaskOp = traceMaskOps . map (fromText . traceLogOp)
+
+hasOp mop op = (traceMaskOps [op] .&. mop) /= 0
 
 traceMaskOps :: [EvmOp] -> Word64
 traceMaskOps = fst . foldl traceMaskOp (0,opcodeMap)
