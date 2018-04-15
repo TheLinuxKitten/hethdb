@@ -1,10 +1,10 @@
 # hethdb
 
-Utilidad y librería para crear y mantener una base de datos MySQL (`ethdb`) con información asociada a los accounts presentes en el blockchain.
+Utilidad y librería para crear y mantener una base de datos MySQL (`ethdb`) con información asociada a los accounts presentes en el blockchain /Ethereum/.
 
-La inicialización de la base de datos crea las tablas y sus indices en la base de datos. Obtiene las direcciones de los accounts del bloque génesis.
+La inicialización de la base de datos crea las tablas y sus indices en la base de datos. Inserta las direcciones de los accounts del bloque génesis.
 
-Procesa los bloques uno a uno. Obtiene la información asociada al bloque y la inserta con una transacción MySQL.
+Su funcionamiento normal es procesar los bloques uno a uno. Obtiene la información asociada al bloque y la inserta con una transacción MySQL.
 
 En cualquier momento se puede detener la aplicación pulsando `Ctrl+C`.
 
@@ -22,5 +22,23 @@ En cualquier momento se puede detener la aplicación pulsando `Ctrl+C`.
   [--log]                           Activa los logs de la librería hethrpc (OFF)
   [--test]                          No inserta información en la base de datos (OFF)
   [-h|--help]                       Muestra las opciones de uso
+```
+
+## Administrar la base de datos
+
+El script `demo/docker-mariadb` se puede usar para ejecutar un container docker y administrar la base de datos.
+
+La opción `--init` establece la contraseña del usuario root (`ethereum`), crea el usuario `kitten` con su contraseña (`kitten`), crea la base de datos `ethdb`, y procesa todos los ficheros `.sql` del directorio `mysql` del proyecto.
+
+### Opciones del script
+
+```
+  [--init]                          Crea la base de datos
+  [--run]                           Ejecuta el demonio MySQL
+  [--cli-root]                      Ejecuta una consola MySQL con el usuario root
+  [--cli-user]                      Ejecuta una consola MySQL con el usuario
+                                    propietario de la base de datos
+  [--ip]                            Muestra la dirección IP del container que
+                                    ejecuta el demonio MySQL
 ```
 

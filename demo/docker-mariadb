@@ -17,16 +17,21 @@ docker_mysql_ip() {
 }
 
 docker_mysql_client() {
-    docker run -it --link $DB_CONTAINER_NAME --rm $DB_IMAGE \
-        sh -c "exec mysql -h\"\$ETHDB_PORT_3306_TCP_ADDR\" -u\"$1\" -p\"$2\""
+    user="$1"
+    passwd="$2"
+    shift 2
+    docker run -it --link $DB_CONTAINER_NAME \
+        -v $DB_INIT_DATADIR:/user-data.d \
+        --rm $DB_IMAGE \
+        sh -c "exec mysql -h\"\$ETHDB_PORT_3306_TCP_ADDR\" -u\"$user\" -p\"$passwd\" $@"
 }
 
 docker_mysql_client_root() {
-    docker_mysql_client root $DB_ROOT_PASSWORD
+    docker_mysql_client root $DB_ROOT_PASSWORD $@
 }
 
 docker_mysql_client_user() {
-    docker_mysql_client $DB_USER $DB_USER_PASSWORD
+    docker_mysql_client $DB_USER $DB_USER_PASSWORD $@
 }
 
 docker_mysql_init() {
@@ -49,6 +54,6 @@ docker_mysql_run() {
 [ "$1" = "--ip" ] && docker_mysql_ip && exit 0
 [ "$1" = "--init" ] && docker_mysql_init && exit 0
 [ "$1" = "--run" ] && docker_mysql_run && exit 0
-[ "$1" = "--cli-root" ] && docker_mysql_client_root && exit 0
-[ "$1" = "--cli-user" ] && docker_mysql_client_user && exit 0
+[ "$1" = "--cli-root" ] && shift 1 && docker_mysql_client_root $@ && exit 0
+[ "$1" = "--cli-user" ] && shift 1 && docker_mysql_client_user $@ && exit 0
 
