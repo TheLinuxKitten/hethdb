@@ -40,28 +40,38 @@ import Network.Web3.Dapp.Bytes
 import Network.Web3.Dapp.EthABI (keccak256)
 import Network.Web3.Dapp.Int
 import System.Environment (getArgs,getProgName)
-import System.IO (BufferMode(..),hPrint,hPutStrLn,hSetBuffering,stderr,stdout)
+import System.IO
+  ( BufferMode(..)
+  , hGetContents
+  , hPrint
+  , hPutStrLn
+  , hSetBuffering
+  , stderr
+  , stdin
+  , stdout
+  )
 import qualified System.IO.Streams as IOS
 import System.Posix.Signals
 
-getOps :: IO (String,Integer,String,Maybe BlockNum,BlockNum,Bool,Bool,Bool,Bool)
+getOps :: IO (String,Integer,String,Maybe String,Maybe BlockNum,BlockNum,Bool,Bool,Bool,Bool)
 getOps = do
   prog <- getProgName
-  go prog ("localhost",3306,"http://localhost:8545",Nothing,100,False,False,False,False) <$> getArgs
+  go prog ("localhost",3306,"http://localhost:8545",Nothing,Nothing,100,False,False,False,False) <$> getArgs
   where
-    go p (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--myHttp":a:as) = go p (a,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--myPort":a:as) = go p (myUrl,read a,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--ethHttp":a:as) = go p (myUrl,myPort,a,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--iniBlk":a:as) = go p (myUrl,myPort,ethUrl,Just $ read a, numBlks, iniDb,doPar,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--numBlks":a:as) = go p (myUrl,myPort,ethUrl,mIniBlk,read a,iniDb,doPar,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--initDb":as) = go p (myUrl,myPort,ethUrl,mIniBlk,numBlks, True,doPar,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--par":as) = go p (myUrl,myPort,ethUrl,mIniBlk,numBlks, iniDb,True,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--log":as) = go p (myUrl,myPort,ethUrl,mIniBlk,numBlks, iniDb,doPar,True,doTest) as
-    go p (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--test":as) = go p (myUrl,myPort,ethUrl,mIniBlk,numBlks, iniDb,doPar,doLog,True) as
+    go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--myHttp":a:as) = go p (a,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--myPort":a:as) = go p (myUrl,read a,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--ethHttp":a:as) = go p (myUrl,myPort,a,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--cmd":a:as) = go p (myUrl,myPort,ethUrl,Just a,mIniBlk,numBlks, iniDb,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--iniBlk":a:as) = go p (myUrl,myPort,ethUrl,mCmd,Just $ read a, numBlks, iniDb,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--numBlks":a:as) = go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,read a,iniDb,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--initDb":as) = go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks, True,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--par":as) = go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks, iniDb,True,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--log":as) = go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks, iniDb,doPar,True,doTest) as
+    go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--test":as) = go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks, iniDb,doPar,doLog,True) as
     go p _ ("-h":as) = msgUso p
     go p _ ("--help":as) = msgUso p
     go _ r [] = r
-    msgUso p = error $ p ++ " [-h|--help] [--myHttp myUrl] [--myPort <port>] [--ethHttp ethUrl] [--iniBlk <num>] [--numBlks <num>] [--initDb] [--par] [--log] [--test]"
+    msgUso p = error $ p ++ " [-h|--help] [--myHttp myUrl] [--myPort <port>] [--ethHttp ethUrl] [--cmd <cmd>] [--iniBlk <num>] [--numBlks <num>] [--initDb] [--par] [--log] [--test]"
 
 putStrLnErr = hPutStrLn stderr
 
@@ -87,11 +97,18 @@ runWeb3 doLog ethUrl f = runWeb3N 1
 
 main :: IO ()
 main = do
-  (myUrl,myPort,ethUrl,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) <- getOps
-  updateDb doTest myUrl myPort ethUrl doPar mIniBlk numBlks iniDb
+  (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) <- getOps
+  case mCmd of
+    Nothing -> updateDb doTest myUrl myPort ethUrl doPar mIniBlk numBlks iniDb
+    Just cmd -> case cmd of
+      "disasm" -> disasmStdin
+      _ -> error $ "Comando no reconocido: " ++ cmd
   {-if doTest
     then tests myUrl myPort ethUrl iniBlk numBlks doLog
     else updateDb doTest myUrl myPort ethUrl doPar iniBlk numBlks iniDb-}
+
+disasmStdin = hGetContents stdin
+           >>= mapM_ print . fromRight "parseEvmCode" . parseEvmCode . read
 
 tests myUrl myPort ethUrl iniBlk numBlks doLog = do
   testLongTrace ethUrl
@@ -151,7 +168,10 @@ traceTxTree = traceTxTree' [[]] 1
       | depth < d = traceTxTree' ([Node t []]:forest:calls) d ts
       | depth > d = let (Node tp _:forest') = head calls
                         calls' = tail calls
-                    in traceTxTree' ((Node t []:Node tp (reverse forest):forest'):calls') d ts
+                        ts' = if depth - 1 == d
+                                then ts
+                                else t:ts
+                    in traceTxTree' ((Node t []:Node tp (reverse forest):forest'):calls') (depth - 1) ts'
 
 updateDb doTest myUrl myPort ethUrl doPar mIniBlk numBlks iniDb = do
   (greet,myCon) <- connectDetail (defConInfo myUrl myPort)
@@ -216,9 +236,12 @@ insertBlockDb doTest ethUrl myCon doPar blkNum = do
         txTrace <- getTraceTx ethUrl (btxHash tx)
         let tls = traceValueTxLogs txTrace
         let rtls = snd $ reduceTraceLogs tls
-        --print tls
-        print rtls
-        print $ traceTxTree rtls
+        print "1 --------------------------------------------------------"
+        mapM_ print tls
+        print "2 --------------------------------------------------------"
+        mapM_ (print . tl2tup) rtls
+        print "3 --------------------------------------------------------"
+        putStrLn $ drawForest $ map (fmap (show . tl2tup)) $ traceTxTree rtls
         ) (getTxs blk)
     else
       ignoreCtrlC $ withTransaction myCon $ do
@@ -228,6 +251,8 @@ insertBlockDb doTest ethUrl myCon doPar blkNum = do
         dbInsertMsgCalls myCon rCall
         dbInsertInternalTxs myCon rItx
         mapM_ (insertMyTouchedAccountDb ethUrl myCon) (nub rDacc)
+  where
+    tl2tup tl = (traceLogDepth tl, traceLogOp tl)
 
 spanDbTxs = reverseDbTxs . foldl spanMyTxs ([],[],[],[],[])
 reverseDbTxs (rTx,rNew,rCall,rItx,rDacc) =
