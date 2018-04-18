@@ -32,6 +32,8 @@ module Database.MySQL.Ethereum.DB
   , hasOp
   , traceMaskOps
   , maskGetOps
+  , dbCreateTableContractCode
+  , dbInsertContractCode
   ) where
 
 import Control.DeepSeq (NFData(..),deepseq)
@@ -115,7 +117,7 @@ mySetGasLimit = MySQLInt64U
 mySetOp = MySQLInt8U
 mySetMop = MySQLBit
 mySetBool = MySQLInt8U . fromIntegral . (fromEnum :: Bool -> Int)
-mySetHash = MySQLBytes . fromHex
+mySetHexData = MySQLBytes . fromHex
 mySetAddr = MySQLBytes . fromHex . getHexAddr
 mySetBigInt = MySQLBytes . bytesN
             . (fromUIntN :: Uint256 -> Bytes32)
@@ -177,7 +179,7 @@ createIndexBlkHashQ = "create index blkHash on blocks (blkHash);"
 insertBlockQ = "insert into blocks (blkNum,blkHash,miner,difficulty,gasLimit) value (?,?,?,?,?);"
 insertBlockP blkNum blkHash miner difficulty gasLimit =
   [ mySetBlkNum blkNum
-  , mySetHash blkHash
+  , mySetHexData blkHash
   , mySetAddr miner
   , mySetBigInt difficulty
   , mySetGasLimit gasLimit
@@ -201,7 +203,7 @@ insertTxQ = "insert into txs (blkNum,txIdx,txHash,txValue,gas,failed,maskOpcodes
 insertTxP blkNum txIdx txHash value gas failed mop =
   [ mySetBlkNum blkNum
   , mySetTxIdx txIdx
-  , mySetHash txHash
+  , mySetHexData txHash
   , mySetBigInt value
   , mySetGas gas
   , mySetBool failed
@@ -226,7 +228,7 @@ insertMsgCall myCon blkNum txIdx fromA toA = do
   print ("call", blkNum, txIdx, fromA, toA)
   execute myCon insertMsgCallQ (insertMsgCallP blkNum txIdx fromA toA) >>= printErr
 dbInsertMsgCalls myCon = tableInsertMyTxs myCon "msgCalls" ["blkNum","txIdx","fromA","toA"]
-selectMsgCallHasFromQ = "select * from msgCalls where fromA = ? where blkNum < ? or (blkNum = ? and txIdx < ?) limit 1;"
+selectMsgCallHasFromQ = "select * from msgCalls where fromA = ? and (blkNum < ? or (blkNum = ? and txIdx < ?)) limit 1;"
 selectMsgCallHasFromP blkNum txIdx addr =
   [ mySetAddr addr
   , mySetBlkNum blkNum
@@ -236,8 +238,8 @@ selectMsgCallHasFromP blkNum txIdx addr =
 dbSelectMsgCallHasFrom myCon blkNum txIdx addr = do
   (colDefs,isValues) <- query myCon selectMsgCallHasFromQ
                           (selectMsgCallHasFromP blkNum txIdx addr)
-  not . null . fromJust <$> myReadAndSkipToEof isValues
-selectMsgCallCountFromQ = "select count(*) from msgCalls where fromA = ? where blkNum < ? or (blkNum = ? and txIdx < ?);"
+  maybe False (not . null) <$> myReadAndSkipToEof isValues
+selectMsgCallCountFromQ = "select count(*) from msgCalls where fromA = ? and (blkNum < ? or (blkNum = ? and txIdx < ?));"
 selectMsgCallCountFromP blkNum txIdx addr =
   [ mySetAddr addr
   , mySetBlkNum blkNum
@@ -247,7 +249,7 @@ selectMsgCallCountFromP blkNum txIdx addr =
 dbSelectMsgCallCountFrom myCon blkNum txIdx addr = do
   (colDefs,isValues) <- query myCon selectMsgCallCountFromQ
                           (selectMsgCallCountFromP blkNum txIdx addr)
-  myGetNum . head . fromJust <$> myReadAndSkipToEof isValues
+  maybe 0 (myGetNum . head) <$> myReadAndSkipToEof isValues
 
 createTableContractCreationsQ = "create table contractCreations (blkNum integer unsigned not null, txIdx smallint unsigned not null, fromA binary(20) not null, contractA binary(20) not null, primary key (blkNum,txIdx));"
 createIndexContractCreationFromQ = "create index contractCreationFrom on contractCreations (fromA);"
@@ -263,7 +265,7 @@ insertContractCreation myCon blkNum txIdx fromA contractA = do
   print ("new", blkNum, txIdx, fromA, contractA)
   execute myCon insertContractCreationQ (insertContractCreationP blkNum txIdx fromA contractA) >>= printErr
 dbInsertContractCreations myCon = tableInsertMyTxs myCon "contractCreations" ["blkNum","txIdx","fromA","contractA"]
-selectContractCreationHasFromQ = "select * from contractCreations where fromA = ? where blkNum < ? or (blkNum = ? and txIdx < ?) limit 1;"
+selectContractCreationHasFromQ = "select * from contractCreations where fromA = ? and (blkNum < ? or (blkNum = ? and txIdx < ?)) limit 1;"
 selectContractCreationHasFromP blkNum txIdx addr =
   [ mySetAddr addr
   , mySetBlkNum blkNum
@@ -273,8 +275,8 @@ selectContractCreationHasFromP blkNum txIdx addr =
 dbSelectContractCreationHasFrom myCon blkNum txIdx addr = do
   (colDefs,isValues) <- query myCon selectContractCreationHasFromQ
                           (selectContractCreationHasFromP blkNum txIdx addr)
-  not . null . fromJust <$> myReadAndSkipToEof isValues
-selectContractCreationCountFromQ = "select count(*) from contractCreations where fromA = ? where blkNum < ? or (blkNum = ? and txIdx < ?);"
+  maybe False (not . null) <$> myReadAndSkipToEof isValues
+selectContractCreationCountFromQ = "select count(*) from contractCreations where fromA = ? and (blkNum < ? or (blkNum = ? and txIdx < ?));"
 selectContractCreationCountFromP blkNum txIdx addr =
   [ mySetAddr addr
   , mySetBlkNum blkNum
@@ -284,7 +286,7 @@ selectContractCreationCountFromP blkNum txIdx addr =
 dbSelectContractCreationCountFrom myCon blkNum txIdx addr = do
   (colDefs,isValues) <- query myCon selectContractCreationCountFromQ
                           (selectContractCreationCountFromP blkNum txIdx addr)
-  myGetNum . head . fromJust <$> myReadAndSkipToEof isValues
+  maybe 0 (myGetNum . head) <$> myReadAndSkipToEof isValues
 
 createTableInternalTxsQ = "create table internalTxs (blkNum integer unsigned not null, txIdx smallint unsigned not null, idx mediumint unsigned not null, fromA binary(20) not null, addr binary(20) not null, opcode tinyint unsigned not null, primary key (blkNum,txIdx,idx));"
 createIndexInternalTxFromQ = "create index internalTxFrom on internalTxs (fromA);"
@@ -315,7 +317,7 @@ selectInternalTxCountAddrP addr =
 dbSelectInternalTxCountAddr myCon addr = do
   (colDefs,isValues) <- query myCon selectInternalTxCountAddrQ
                                 (selectInternalTxCountAddrP addr)
-  myGetNum . head . fromJust <$> myReadAndSkipToEof isValues
+  maybe 0 (myGetNum . head) <$> myReadAndSkipToEof isValues
 
 opCreate = toOpcode OpCREATE
 opCall = toOpcode OpCALL
@@ -453,4 +455,23 @@ dbCreateDB = do
   execute_ myCon "grant all privileges on `ethdb`.* to 'kitten'@'%';" >>= print
   execute_ myCon "flush privileges;" >>= print
   close myCon
+
+createContractCodeQ = "create table contractsCode (blkNum integer unsigned not null, addr binary(20) not null, isBinRuntime boolean not null, bzzr0 binary(32), code mediumblob not null, primary key (addr));"
+createIndexBzzr0Q = "create index contractCodeBzzr0 on contractsCode (bzzr0);"
+insertContractCodeQ = "insert into contractsCode (blkNum,addr,isBinRuntime,bzzr0,code) value (?,?,?,?,?);"
+insertContractCodeP blkNum addr isBinRuntime mBzzr0 code =
+  [ mySetBlkNum blkNum
+  , mySetAddr addr
+  , mySetBool isBinRuntime
+  , maybe MySQLNull mySetHexData mBzzr0
+  , mySetHexData code
+  ]
+dbInsertContractCode myCon blkNum addr isBinRuntime mBzzr0 code = do
+  print ("code", blkNum, addr, isBinRuntime, mBzzr0, code)
+  execute myCon insertContractCodeQ (insertContractCodeP blkNum addr isBinRuntime mBzzr0 code) >>= printErr
+
+dbCreateTableContractCode :: MySQLConn -> IO ()
+dbCreateTableContractCode myCon = do
+  execute_ myCon createContractCodeQ >>= printErr
+  execute_ myCon createIndexBzzr0Q >>= printErr
 
