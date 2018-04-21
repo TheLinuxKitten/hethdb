@@ -78,23 +78,6 @@ putStrLnErr = hPutStrLn stderr
 printErr :: (Show a) => a -> IO ()
 printErr = hPrint stderr
 
-runWeb3 doLog ethUrl f = runWeb3N 1
-  where
-    runWeb3N n = do
-      er <- runWeb3'
-      case er of
-        Left e ->
-          if n > 10
-            then return er
-            else do
-              threadDelay (5*10^6)
-              runWeb3N (n+1)
-        Right r -> return er
-    runWeb3' = runStderrLoggingT
-             $ filterLoggerLogLevel
-                   (if doLog then LevelDebug else LevelOther "NoLogs")
-             $ runWeb3HttpT 15 15 ethUrl f
-
 main :: IO ()
 main = do
   (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) <- getOps
@@ -143,16 +126,6 @@ testLongTrace ethUrl = do
   print $ traceTxTree rLogs
   --print traceTx
 
-contractAddress :: HexEthAddr -> Integer -> HexEthAddr
-contractAddress addr nonce =
-  let addrRlp = RLP.rlpEncode
-              $ (fromHex :: T.Text -> BS.ByteString)
-              $ getHexAddr addr
-      nonceRlp = RLP.rlpEncode (nonce - 1)
-      bs = RLP.rlpBs $ RLP.encode
-         $ RLP.RlpList [addrRlp, nonceRlp]
-  in HexEthAddr $ toHex $ BS.drop (32-20) $ keccak256 bs
-
 getTxs = sortTxs . rebTransactions
 
 traceLogFromJSON :: Value -> RpcTraceLog
@@ -185,25 +158,9 @@ initDb ethUrl myCon = do
   dbCreateTables myCon
   insertBlockGenesis ethUrl myCon
 
-fromRight _ (Right r) = r
-fromRight t (Left e) = error $ show t ++ ": " ++ show e
-
-addrN :: (Integral n) => n -> HexEthAddr
-addrN = HexEthAddr . toHex . bytesN
-      . (fromUIntN :: Uint160 -> Bytes20)
-      . (fromInteger :: Integer -> Uint160)
-      . fromIntegral
-
-addr0 = addrN 0
-addr1 = addrN 1
-addr2 = addrN 2
-addr3 = addrN 3
-addr4 = addrN 4
-
 insertBlockGenesis :: String -> MySQLConn -> IO ()
 insertBlockGenesis ethUrl myCon = do
-  accs <- stateAccounts . fromRight "debug_dumpBlock"
-      <$> runWeb3 False ethUrl (debug_dumpBlock 0)
+  accs <- stateAccounts <$> dumpBlock ethUrl 0
   mapM_ (\acc -> dbInsertGenesis myCon (accAddr acc) (accBalance acc)) accs
 
 insertBlocksDb doTest mIniBlk numBlks ethUrl myCon doPar = do
@@ -221,8 +178,7 @@ ignoreCtrlC f = do
   return r
 
 insertBlockDb doTest ethUrl myCon doPar blkNum = do
-  blk <- fromJust . fromRight "eth_getBlockByNumber"
-     <$> runWeb3 False ethUrl (eth_getBlockByNumber (RPBNum blkNum) True)
+  blk <- getBlockByNumber ethUrl blkNum
   let mtx = MyBlock blkNum (fromJust $ rebHash blk)
                     (fromJust $ rebMiner blk) (rebDifficulty blk)
                     (rebGasLimit blk)
@@ -232,7 +188,7 @@ insertBlockDb doTest ethUrl myCon doPar blkNum = do
   if doTest
     then do
       print mtx
-      {-mapM_ (\(POObject tx) -> do
+      mapM_ (\(POObject tx) -> do
         txTrace <- getTraceTx ethUrl (btxHash tx)
         let tls = traceValueTxLogs txTrace
         let rtls = snd $ reduceTraceLogs tls
@@ -242,7 +198,7 @@ insertBlockDb doTest ethUrl myCon doPar blkNum = do
         mapM_ (print . tl2tup) rtls
         print "3 --------------------------------------------------------"
         putStrLn $ drawForest $ map (fmap (show . tl2tup)) $ traceTxTree rtls
-        ) (getTxs blk)-}
+        ) (getTxs blk)
       let txs = sort $ nub $ map (\(MyTouchedAccount _ txIdx _) -> txIdx) rDacc
       let txAddrs = map (\txIdx -> (txIdx,map (\(MyTouchedAccount _ _ to) -> to) $ filter (\(MyTouchedAccount _ txIdx' _) -> txIdx == txIdx') rDacc)) txs
       rDacc' <- mapM (\(txIdx,addrs) -> map (MyTouchedAccount blkNum txIdx)
@@ -280,8 +236,6 @@ spanMyTx (rTx,rNew,rCall,rItx,rDacc) mtx = case mtx of
 
 nullAddr = (==addr0)
 
-isReservedAddr addr = addr `elem` [addr0,addr1,addr2,addr3,addr4]
-
 parallelizeItxs doPar myDbTxs =
   let mDbItxs1 = map (\(_,_,_,(mtxs,_)) -> mtxs) myDbTxs
       mDbItxs4 = if doPar
@@ -311,9 +265,8 @@ getDbTx ethUrl (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto txVal
   let mtx1 = MyTx blkNum txIdx txHash txValue txGas failed mop
   (mtx2,mdas2,cAddr) <- case mto of
     Nothing -> do
-      cAddr <- fromJust . txrContractAddress . fromJust
-             . fromRight "eth_getTransactionReceipt"
-           <$> runWeb3 False ethUrl (eth_getTransactionReceipt txHash)
+      cAddr <- fromJust . txrContractAddress
+           <$> getTransactionReceipt ethUrl txHash
       let mtx = MyContractCreation blkNum txIdx from cAddr
       return (mtx,[],cAddr)
     Just to -> do
@@ -324,8 +277,6 @@ getDbTx ethUrl (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto txVal
                         then getDbInternalTxs
                                 blkNum txIdx cAddr $ traceTxTree tls
                         else ([],[])
-  --let mdas = if null mdas2 then mdas3 else head mdas2:mdas3
-  --return (mtx1:mtx2:mtxs3,mdas)
   return (mtx1,mtx2,mdas2,(mtxs3,mdas3))
 
 reduceTraceLogs :: [Value] -> (Word64,[RpcTraceLog])
@@ -466,15 +417,10 @@ insertMyTouchedAccountDb ethUrl myCon mtx = case mtx of
         when isDead $ dbInsertDeadAccount myCon blkNum txIdx addr
   _ -> error $ "dbInsertMyTouchedAccount: " ++ show mtx
 
-getBalance ethUrl blkNum addr =
-  maybe 0 id . fromRight "eth_getBalance'"
-    <$> runWeb3 False ethUrl (eth_getBalance' addr $ RPBNum blkNum)
+isReservedAddr addr = addr `elem` [addr0,addr1,addr2,addr3,addr4]
 
-getCode ethUrl blkNum addr =
-  fromRight "eth_getCode"
-    <$> runWeb3 False ethUrl (eth_getCode addr $ RPBNum blkNum)
-
-deadAccounts :: String -> MySQLConn -> BlockNum -> Int -> [HexEthAddr] -> IO [HexEthAddr]
+deadAccounts :: String -> MySQLConn -> BlockNum -> Int
+             -> [HexEthAddr] -> IO [HexEthAddr]
 deadAccounts ethUrl myCon blkNum txIdx addrs = do
   let addrs1 = filter (not . isReservedAddr) addrs
   addrs2 <- map fst . filter ((==0) . snd)
@@ -515,9 +461,52 @@ accountHasNonce myCon blkNum txIdx addr = do
     then return True
     else dbSelectContractCreationHasFrom myCon blkNum txIdx addr
 
+fromRight _ (Right r) = r
+fromRight t (Left e) = error $ show t ++ ": " ++ show e
+
+addrN :: (Integral n) => n -> HexEthAddr
+addrN = HexEthAddr . toHex . bytesN
+      . (fromUIntN :: Uint160 -> Bytes20)
+      . (fromInteger :: Integer -> Uint160)
+      . fromIntegral
+
+addr0 = addrN 0
+addr1 = addrN 1
+addr2 = addrN 2
+addr3 = addrN 3
+addr4 = addrN 4
+
+contractAddress :: HexEthAddr -> Integer -> HexEthAddr
+contractAddress addr nonce =
+  let addrRlp = RLP.rlpEncode
+              $ (fromHex :: T.Text -> BS.ByteString)
+              $ getHexAddr addr
+      nonceRlp = RLP.rlpEncode (nonce - 1)
+      bs = RLP.rlpBs $ RLP.encode
+         $ RLP.RlpList [addrRlp, nonceRlp]
+  in HexEthAddr $ toHex $ BS.drop (32-20) $ keccak256 bs
+
+getBalance ethUrl blkNum addr =
+  maybe 0 id . fromRight "eth_getBalance'"
+    <$> runWeb3 False ethUrl (eth_getBalance' addr $ RPBNum blkNum)
+
+getCode ethUrl blkNum addr =
+  fromRight "eth_getCode"
+    <$> runWeb3 False ethUrl (eth_getCode addr $ RPBNum blkNum)
+
+getTransactionReceipt ethUrl txHash =
+  fromJust . fromRight "eth_getTransactionReceipt"
+    <$> runWeb3 False ethUrl (eth_getTransactionReceipt txHash)
+
+getBlockByNumber ethUrl blkNum = fromJust . fromRight "eth_getBlockByNumber"
+                             <$> runWeb3 False ethUrl
+                                   (eth_getBlockByNumber (RPBNum blkNum) True)
 accountNonce myCon addr = (+)
                       <$> dbSelectMsgCallCountFrom myCon addr
                       <*> dbSelectContractCreationCountFrom myCon addr
+
+dumpBlock ethUrl blkNum = fromRight "debug_dumpBlock"
+                      <$> runWeb3 False ethUrl (debug_dumpBlock blkNum)
 
 getTraceTx ethUrl txHash = fromRight "debug_traceTransactionValue"
                        <$> runWeb3 False ethUrl
@@ -526,4 +515,21 @@ getTraceTx ethUrl txHash = fromRight "debug_traceTransactionValue"
                                       { traceOpDisableStorage = True
                                       , traceOpDisableMemory = True
                                       }))
+
+runWeb3 doLog ethUrl f = runWeb3N 1
+  where
+    runWeb3N n = do
+      er <- runWeb3'
+      case er of
+        Left e ->
+          if n > 10
+            then return er
+            else do
+              threadDelay (5*10^6)
+              runWeb3N (n+1)
+        Right r -> return er
+    runWeb3' = runStderrLoggingT
+             $ filterLoggerLogLevel
+                   (if doLog then LevelDebug else LevelOther "NoLogs")
+             $ runWeb3HttpT 15 15 ethUrl f
 
