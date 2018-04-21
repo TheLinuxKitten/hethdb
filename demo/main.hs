@@ -27,7 +27,7 @@ import Data.Ethereum.EvmDisasm
 import Data.Ethereum.EvmOp
 import qualified Data.Ethereum.RLP as RLP
 import Data.Maybe (fromJust, isJust)
-import Data.List (nub)
+import Data.List (nub,sort)
 import Data.Monoid ((<>))
 import qualified Data.Text as T
 import Data.Tree
@@ -232,7 +232,7 @@ insertBlockDb doTest ethUrl myCon doPar blkNum = do
   if doTest
     then do
       print mtx
-      mapM_ (\(POObject tx) -> do
+      {-mapM_ (\(POObject tx) -> do
         txTrace <- getTraceTx ethUrl (btxHash tx)
         let tls = traceValueTxLogs txTrace
         let rtls = snd $ reduceTraceLogs tls
@@ -242,7 +242,13 @@ insertBlockDb doTest ethUrl myCon doPar blkNum = do
         mapM_ (print . tl2tup) rtls
         print "3 --------------------------------------------------------"
         putStrLn $ drawForest $ map (fmap (show . tl2tup)) $ traceTxTree rtls
-        ) (getTxs blk)
+        ) (getTxs blk)-}
+      let txs = sort $ nub $ map (\(MyTouchedAccount _ txIdx _) -> txIdx) rDacc
+      let txAddrs = map (\txIdx -> (txIdx,map (\(MyTouchedAccount _ _ to) -> to) $ filter (\(MyTouchedAccount _ txIdx' _) -> txIdx == txIdx') rDacc)) txs
+      rDacc' <- mapM (\(txIdx,addrs) -> map (MyTouchedAccount blkNum txIdx)
+                                     <$> deadAccounts ethUrl myCon blkNum txIdx addrs
+                  ) txAddrs
+      mapM_ print rDacc'
     else
       ignoreCtrlC $ withTransaction myCon $ do
         dbInsertMyTx myCon mtx
@@ -250,7 +256,7 @@ insertBlockDb doTest ethUrl myCon doPar blkNum = do
         dbInsertContractCreations myCon rNew
         dbInsertMsgCalls myCon rCall
         dbInsertInternalTxs myCon rItx
-        mapM_ (insertMyTouchedAccountDb ethUrl myCon) (nub rDacc)
+        insertMyTouchedAccountsDb ethUrl myCon blkNum rDacc
   where
     tl2tup tl = (traceLogDepth tl, traceLogOp tl)
 
@@ -431,6 +437,25 @@ opRevert = toOpcode OpREVERT
 opInvalid = toOpcode OpINVALID
 opSelfdestruct = toOpcode OpSELFDESTRUCT
 
+insertMyTouchedAccountsDb ethUrl myCon blkNum rDacc = do
+  let proto = ethProto publicEthProtoCfg blkNum
+  when (proto `elem` enumFrom SpuriousDragon) $ do
+    let txIdxs = sort $ nub $ map (\(MyTouchedAccount _ txIdx _) -> txIdx) rDacc
+    let txIdxAddrs = map (\txIdx -> (txIdx,nub $ map (\(MyTouchedAccount _ _ to) -> to) $ filter (\(MyTouchedAccount _ txIdx' _) -> txIdx == txIdx') rDacc)) txIdxs
+    rDacc' <- concat <$> mapM (\(txIdx,addrs) ->
+                if null addrs
+                  then return []
+                  else do
+                    addrs1 <- deadAccounts ethUrl myCon blkNum txIdx addrs
+                    if null addrs1
+                      then return []
+                      else do
+                        addrs2 <- dbSelectDeadAccountAddrs myCon addrs1
+                        let addrs3 = filter (\addr -> not $ addr `elem` addrs2) addrs1
+                        return $ map (MyTouchedAccount blkNum txIdx) addrs3
+                ) txIdxAddrs
+    unless (null rDacc') $ dbInsertDeadAccounts myCon rDacc'
+
 insertMyTouchedAccountDb ethUrl myCon mtx = case mtx of
   (MyTouchedAccount blkNum txIdx addr) -> do
     let proto = ethProto publicEthProtoCfg blkNum
@@ -441,19 +466,45 @@ insertMyTouchedAccountDb ethUrl myCon mtx = case mtx of
         when isDead $ dbInsertDeadAccount myCon blkNum txIdx addr
   _ -> error $ "dbInsertMyTouchedAccount: " ++ show mtx
 
+getBalance ethUrl blkNum addr =
+  maybe 0 id . fromRight "eth_getBalance'"
+    <$> runWeb3 False ethUrl (eth_getBalance' addr $ RPBNum blkNum)
+
+getCode ethUrl blkNum addr =
+  fromRight "eth_getCode"
+    <$> runWeb3 False ethUrl (eth_getCode addr $ RPBNum blkNum)
+
+deadAccounts :: String -> MySQLConn -> BlockNum -> Int -> [HexEthAddr] -> IO [HexEthAddr]
+deadAccounts ethUrl myCon blkNum txIdx addrs = do
+  let addrs1 = filter (not . isReservedAddr) addrs
+  addrs2 <- map fst . filter ((==0) . snd)
+        <$> mapM (\addr -> getBalance ethUrl blkNum addr
+                            >>= \bal -> return (addr,bal)) addrs1
+  addrs3 <- map fst . filter ((=="0x") . snd)
+        <$> mapM (\addr -> getCode ethUrl blkNum addr
+                            >>= \c -> return (addr,c)) addrs2
+  addrs4 <- if null addrs3
+              then return []
+              else do
+                addrs4a <- dbSelectMsgCallsFroms myCon blkNum txIdx addrs3
+                return $ filter (\addr -> not $ addr `elem` addrs4a) addrs3
+  if null addrs4
+    then return []
+    else do
+      addrs5a <- dbSelectContractCreationFroms myCon blkNum txIdx addrs4
+      return $ filter (\addr -> not $ addr `elem` addrs5a) addrs4
+
 isDeadAccount ethUrl myCon blkNum txIdx addr =
   if isReservedAddr addr
     then return False
     else isEmptyAccount ethUrl myCon blkNum txIdx addr
 
 isEmptyAccount ethUrl myCon blkNum txIdx addr = do
-  balance <- maybe 0 id . fromRight "eth_getBalance'"
-         <$> runWeb3 False ethUrl (eth_getBalance' addr $ RPBNum blkNum)
+  balance <- getBalance ethUrl blkNum addr
   if balance /= 0
     then return False
     else do
-      hasCode <- (/="0x") . fromRight "eth_getCode"
-             <$> runWeb3 False ethUrl (eth_getCode addr $ RPBNum blkNum)
+      hasCode <- (/="0x") <$> getCode ethUrl blkNum addr
       if hasCode
         then return False
         else not <$> accountHasNonce myCon blkNum txIdx addr

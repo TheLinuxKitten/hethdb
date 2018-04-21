@@ -19,15 +19,19 @@ module Database.MySQL.Ethereum.DB
   , dbSelectLatestBlockNum
   , dbInsertTxs
   , dbInsertMsgCalls
+  , dbSelectMsgCallsFroms
   , dbSelectMsgCallHasFrom
   , dbSelectMsgCallCountFrom
   , dbInsertContractCreations
+  , dbSelectContractCreationFroms
   , dbSelectContractCreationHasFrom
   , dbSelectContractCreationCountFrom
   , dbInsertInternalTxs
   , dbSelectInternalTxCountAddr
   , dbInsertDeadAccount
+  , dbInsertDeadAccounts
   , dbSelectDeadAccountAddr
+  , dbSelectDeadAccountAddrs
   , traceLogsMaskOp
   , hasOp
   , traceMaskOps
@@ -123,6 +127,7 @@ mySetBigInt = MySQLBytes . bytesN
             . (fromUIntN :: Uint256 -> Bytes32)
             . fromInteger
 
+myGetAddr (MySQLBytes bs) = HexEthAddr (toHex bs)
 myGetNum myVal = case myVal of
   MySQLInt8U v -> fromIntegral v
   MySQLInt8 v -> fromIntegral v
@@ -153,6 +158,7 @@ myTxValue mtx = case mtx of
     insertMsgCallP blkNum txIdx fromA toA
   (MyInternalTx blkNum txIdx idx fromA addr opcode) ->
     insertInternalTxP blkNum txIdx idx fromA addr opcode
+  (MyTouchedAccount blkNum txIdx addr) -> insertDeadAccountP blkNum txIdx addr
   _ -> error $ "myTxValue: " ++ show mtx
 
 tableInsertMyTxs myCon tblNom colNoms mtxs =
@@ -214,6 +220,20 @@ insertTx myCon blkNum txIdx txHash value gas failed mop = do
   execute myCon insertTxQ (insertTxP blkNum txIdx txHash value gas failed mop) >>= printErr
 dbInsertTxs myCon = tableInsertMyTxs myCon "txs" ["blkNum","txIdx","txHash","txValue","gas","failed","maskOpcodes"]
 
+selectTableFromsQ tNom addrs =
+  let addrsL = LBS.intercalate "," $ replicate (length addrs) "?"
+  in Query $ "select fromA from " <> tNom <> " where fromA in (" <> addrsL <> ") and (blkNum < ? or (blkNum = ? and txIdx < ?));"
+selectTableFromsP blkNum txIdx addrs =
+  map mySetAddr addrs ++
+  [ mySetBlkNum blkNum
+  , mySetBlkNum blkNum
+  , mySetTxIdx txIdx
+  ]
+selectTableFroms tNom myCon blkNum txIdx addrs = do
+  (colDefs,isValues) <- query myCon (selectTableFromsQ tNom addrs)
+                          (selectTableFromsP blkNum txIdx addrs)
+  maybe [] (map myGetAddr) <$> myReadAndSkipToEof isValues
+
 createTableMsgCallsQ = "create table msgCalls (blkNum integer unsigned not null, txIdx smallint unsigned not null, fromA binary(20) not null, toA binary(20) not null, primary key (blkNum,txIdx));"
 createIndexMsgCallFromQ = "create index msgCallFrom on msgCalls (fromA);"
 createIndexMsgCallToQ = "create index msgCallTo on msgCalls (toA);"
@@ -228,6 +248,7 @@ insertMsgCall myCon blkNum txIdx fromA toA = do
   print ("call", blkNum, txIdx, fromA, toA)
   execute myCon insertMsgCallQ (insertMsgCallP blkNum txIdx fromA toA) >>= printErr
 dbInsertMsgCalls myCon = tableInsertMyTxs myCon "msgCalls" ["blkNum","txIdx","fromA","toA"]
+dbSelectMsgCallsFroms = selectTableFroms "msgCalls"
 selectMsgCallHasFromQ = "select * from msgCalls where fromA = ? and (blkNum < ? or (blkNum = ? and txIdx < ?)) limit 1;"
 selectMsgCallHasFromP blkNum txIdx addr =
   [ mySetAddr addr
@@ -265,6 +286,7 @@ insertContractCreation myCon blkNum txIdx fromA contractA = do
   print ("new", blkNum, txIdx, fromA, contractA)
   execute myCon insertContractCreationQ (insertContractCreationP blkNum txIdx fromA contractA) >>= printErr
 dbInsertContractCreations myCon = tableInsertMyTxs myCon "contractCreations" ["blkNum","txIdx","fromA","contractA"]
+dbSelectContractCreationFroms = selectTableFroms "contractCreations"
 selectContractCreationHasFromQ = "select * from contractCreations where fromA = ? and (blkNum < ? or (blkNum = ? and txIdx < ?)) limit 1;"
 selectContractCreationHasFromP blkNum txIdx addr =
   [ mySetAddr addr
@@ -335,7 +357,7 @@ insertDeadAccountP blkNum txIdx addr =
 dbInsertDeadAccount myCon blkNum txIdx addr = do
   print ("dead",blkNum,txIdx,addr)
   execute myCon insertDeadAccountQ (insertDeadAccountP blkNum txIdx addr) >>= printErr
-
+dbInsertDeadAccounts myCon = tableInsertMyTxs myCon "deadAccounts" ["blkNum","txIdx","addr"]
 selectDeadAccountAddrQ = "select * from deadAccounts where addr = ?"
 selectDeadAccountAddrP addr = [mySetAddr addr]
 dbSelectDeadAccountAddr myCon addr = do
@@ -343,6 +365,14 @@ dbSelectDeadAccountAddr myCon addr = do
                                       (selectDeadAccountAddrP addr)
   mVals <- myReadAndSkipToEof isValues
   return ((\vals -> if null vals then Nothing else Just (head vals)) <$> mVals)
+selectDeadAccountAddrsQ addrs =
+  let addrsL = LBS.intercalate "," $ replicate (length addrs) "?"
+  in Query $ "select addr from deadAccounts where addr in (" <> addrsL <> ");"
+selectDeadAccountAddrsP = map mySetAddr
+dbSelectDeadAccountAddrs myCon addrs = do
+  (colDefs,isValues) <- query myCon (selectDeadAccountAddrsQ addrs)
+                                      (selectDeadAccountAddrsP addrs)
+  maybe [] (map myGetAddr) <$> myReadAndSkipToEof isValues
 
 dbInsertMyTx myCon mtx = case mtx of
   (MyBlock blkNum blkHash miner difficulty gasLimit) ->
