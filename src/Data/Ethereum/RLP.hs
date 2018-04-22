@@ -1,4 +1,10 @@
-{-# LANGUAGE ExistentialQuantification #-}
+--{-# LANGUAGE DataKinds #-}
+--{-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE FlexibleInstances #-}
+--{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE RankNTypes #-}
+--{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeSynonymInstances #-}
 
 --------------------------------------------------------------------------
 --
@@ -17,9 +23,14 @@ module Data.Ethereum.RLP
     , decode
     ) where
 
+import Data.Int
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Word
+import GHC.TypeLits (KnownNat)
+import Network.Web3.Dapp.Bytes
+import Network.Web3.Dapp.FixArray
+import Network.Web3.Dapp.Int
 
 -- |Estructura de datos a codificar
 data RlpData = RlpStr { strBs :: ByteString }
@@ -31,7 +42,7 @@ newtype RlpStream = RlpStream { rlpBs :: ByteString }
                   deriving (Show)
 
 -- |Clase para otros tipos puedan codificarse para
--- su codificación/decodificación con 'encode'/'decode'
+-- su /codificación/\//decodificación/ con 'encode'\/'decode'
 class Rlp a where
     rlpEncode :: a -> RlpData
     rlpDecode :: RlpData -> a
@@ -50,6 +61,26 @@ encInt = RlpStr . toBinary
 decInt :: forall a. Integral a => RlpData -> a
 decInt = fromBinary . strBs
 
+instance Rlp Int8 where
+    rlpEncode = encInt
+    rlpDecode = decInt
+
+instance Rlp Int16 where
+    rlpEncode = encInt
+    rlpDecode = decInt
+
+instance Rlp Int32 where
+    rlpEncode = encInt
+    rlpDecode = decInt
+
+instance Rlp Int64 where
+    rlpEncode = encInt
+    rlpDecode = decInt
+
+instance Rlp Word8 where
+    rlpEncode = encInt
+    rlpDecode = decInt
+
 instance Rlp Word16 where
     rlpEncode = encInt
     rlpDecode = decInt
@@ -66,13 +97,29 @@ instance Rlp Integer where
     rlpEncode = encInt
     rlpDecode = decInt
 
-instance forall a. (Rlp a) => Rlp [a] where
-    rlpEncode = RlpList . map rlpEncode
-    rlpDecode = map rlpDecode . lstData
+instance KnownNat n => Rlp (IntN n) where
+    rlpEncode = rlpEncode . toInteger
+    rlpDecode = fromInteger . rlpDecode
+
+instance KnownNat n => Rlp (UIntN n) where
+    rlpEncode = rlpEncode . toInteger
+    rlpDecode = fromInteger . rlpDecode
 
 instance Rlp ByteString where
     rlpEncode = RlpStr
     rlpDecode = strBs
+
+instance KnownNat n => Rlp (BytesN n) where
+    rlpEncode = rlpEncode . bytesN
+    rlpDecode = updateN zeroN . rlpDecode
+
+instance forall a. (Rlp a) => Rlp [a] where
+    rlpEncode = RlpList . map rlpEncode
+    rlpDecode = map rlpDecode . lstData
+
+instance (KnownNat n, Rlp a) => Rlp (FixArray n a) where
+    rlpEncode = rlpEncode . fromFixArray
+    rlpDecode = toFixArray' . rlpDecode
 
 -- |Codifica la estructura de datos de entrada
 encode :: RlpData -> RlpStream
