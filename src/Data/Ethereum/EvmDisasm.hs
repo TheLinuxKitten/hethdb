@@ -32,12 +32,13 @@ parseOpcode = do
   [opCode] <- BS.unpack . hex2bs <$> parseByteCode
   let op = fromOpcode opCode
   let opNom = toText op
-  if isOpPush op
-    then parsePush pos opNom (fromIntegral opCode - 0x60 + 1)
+  let (isPush,idx) = isOpPush op
+  if isPush
+    then parsePush pos opNom (fromIntegral idx)
     else returnPos pos opNom
   where
-    isOpPush (OpPUSH _) = True
-    isOpPush _ = False
+    isOpPush (OpPUSH n) = (True,n)
+    isOpPush _ = (False,0)
     parseByteCode = T.pack <$> P.count 2 P.hexDigit
     parsePush pos opNom numBytes = do
       codeBytes <- joinHex . T.concat <$> P.count numBytes parseByteCode'
