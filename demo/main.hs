@@ -27,8 +27,9 @@ import Data.Ethereum.EvmDisasm
 import Data.Ethereum.EvmOp
 import qualified Data.Ethereum.RLP as RLP
 import Data.Maybe (fromJust, isJust)
-import Data.List (nub,sort)
+import Data.List (groupBy,nub,nubBy,sort,sortBy)
 import Data.Monoid ((<>))
+import Data.Ord (comparing)
 import qualified Data.Text as T
 import Data.Tree
 import Data.Word (Word8,Word32,Word64)
@@ -38,6 +39,7 @@ import Network.JsonRpcConn (LogLevel(..), filterLoggerLogLevel)
 import Network.Web3
 import Network.Web3.Dapp.Bytes
 import Network.Web3.Dapp.EthABI (keccak256)
+import Network.Web3.Dapp.EthABI.Bzz (getBinBzzr0)
 import Network.Web3.Dapp.Int
 import System.Environment (getArgs,getProgName)
 import System.IO
@@ -85,6 +87,7 @@ main = do
     Nothing -> updateDb doTest myUrl myPort ethUrl doPar mIniBlk numBlks iniDb
     Just cmd -> case cmd of
       "disasm" -> disasmStdin
+      "updateCode" -> updateCodeDb doTest myUrl myPort ethUrl mIniBlk numBlks iniDb
       _ -> error $ "Comando no reconocido: " ++ cmd
   {-if doTest
     then tests myUrl myPort ethUrl iniBlk numBlks doLog
@@ -128,24 +131,6 @@ testLongTrace ethUrl = do
 
 getTxs = sortTxs . rebTransactions
 
-traceLogFromJSON :: Value -> RpcTraceLog
-traceLogFromJSON = (\(Success a) -> a) . fromJSON
-
-traceTxTree :: [RpcTraceLog] -> [Tree RpcTraceLog]
-traceTxTree = traceTxTree' [[]] 1
-  where
-    traceTxTree' [[]] _ [] = []
-    traceTxTree' (forest:[]) _ [] = reverse forest
-    traceTxTree' (forest:calls) depth (t@(RpcTraceLog d me _ _ _ op _ _ _):ts)
-      | depth == d = traceTxTree' ((Node t []:forest):calls) d ts
-      | depth < d = traceTxTree' ([Node t []]:forest:calls) d ts
-      | depth > d = let (Node tp _:forest') = head calls
-                        calls' = tail calls
-                        ts' = if depth - 1 == d
-                                then ts
-                                else t:ts
-                    in traceTxTree' ((Node t []:Node tp (reverse forest):forest'):calls') (depth - 1) ts'
-
 updateDb doTest myUrl myPort ethUrl doPar mIniBlk numBlks iniDb = do
   (greet,myCon) <- connectDetail (defConInfo myUrl myPort)
   printErr greet
@@ -156,6 +141,7 @@ updateDb doTest myUrl myPort ethUrl doPar mIniBlk numBlks iniDb = do
 initDb :: String -> MySQLConn -> IO ()
 initDb ethUrl myCon = do
   dbCreateTables myCon
+  dbCreateTableContractCode myCon
   insertBlockGenesis ethUrl myCon
 
 insertBlockGenesis :: String -> MySQLConn -> IO ()
@@ -206,13 +192,17 @@ insertBlockDb doTest ethUrl myCon doPar blkNum = do
                   ) txAddrs
       mapM_ print rDacc'
     else
-      ignoreCtrlC $ withTransaction myCon $ do
-        dbInsertMyTx myCon mtx
-        dbInsertTxs myCon rTx
-        dbInsertContractCreations myCon rNew
-        dbInsertMsgCalls myCon rCall
-        dbInsertInternalTxs myCon rItx
-        insertMyTouchedAccountsDb ethUrl myCon blkNum rDacc
+      ignoreCtrlC $ do
+        withTransaction myCon $ do
+          dbInsertMyTx myCon mtx
+          dbInsertTxs myCon rTx
+          dbInsertContractCreations myCon rNew
+          dbInsertMsgCalls myCon rCall
+          dbInsertInternalTxs myCon rItx
+          insertMyTouchedAccountsDb ethUrl myCon blkNum rDacc
+        withTransaction myCon $ do
+          let mtxsNew = joinNews (rNew ++ filter (\(MyInternalTx _ _ _ _ _ opcode) -> opcode == opCreate) rItx)
+          mapM_ (mapM_ (insertBlockContractCodeDb myCon ethUrl)) mtxsNew
   where
     tl2tup tl = (traceLogDepth tl, traceLogOp tl)
 
@@ -279,17 +269,43 @@ getDbTx ethUrl (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto txVal
                         else ([],[])
   return (mtx1,mtx2,mdas2,(mtxs3,mdas3))
 
+valuesMaskOps :: [Value] -> Word64
+valuesMaskOps = traceMaskOps . map valueOp
+  where
+    valueOp = fromText . traceLogOp . traceLogFromJSON
+
+traceLogFromJSON :: Value -> RpcTraceLog
+traceLogFromJSON = (\(Success a) -> a) . fromJSON
+
+traceTxTree :: [RpcTraceLog] -> [Tree RpcTraceLog]
+traceTxTree = traceTxTree' [[]] 1
+  where
+    traceTxTree' [[]] _ [] = []
+    traceTxTree' (forest:[]) _ [] = reverse forest
+    traceTxTree' (forest:calls) depth (t@(RpcTraceLog d me _ _ _ op _ _ _):ts)
+      | depth == d = traceTxTree' ((Node t []:forest):calls) d ts
+      | depth < d = traceTxTree' ([Node t []]:forest:calls) d ts
+      | depth > d = let (Node tp _:forest') = head calls
+                        calls' = tail calls
+                        ts' = if depth - 1 == d
+                                then ts
+                                else t:ts
+                    in traceTxTree' ((Node t []:Node tp (reverse forest):forest'):calls') (depth - 1) ts'
+
 reduceTraceLogs :: [Value] -> (Word64,[RpcTraceLog])
 reduceTraceLogs values =
-  let (ops,rtls) = reduceTraceLogs' ([],[]) values
-  in (traceMaskOps ops,rtls)
+  let tls = map traceLogFromJSON values
+  in (traceMaskOps $ map (fromText . traceLogOp) tls,tls)
+{-reduceTraceLogs = reduceTraceLogs' (True,[])
   where
-    reduceTraceLogs' (ops,rtls) [] = (reverse ops, reverse rtls)
-    reduceTraceLogs' (ops,rtls) (val:vals) =
-      let tl = traceLogFromJSON val
-          op = fromText $ traceLogOp tl
-          isRtl = op `elem` reducedOps
-      in reduceTraceLogs' (op:ops,if isRtl then tl:rtls else rtls) vals
+    reduceTraceLogs' (es1,rtls) [] = reverse rtls
+    reduceTraceLogs' (es1,rtls) (val:vals) =
+      let isRtl = if es1
+                    then True
+                    else let tl = traceLogFromJSON val
+                             op = fromText $ traceLogOp tl
+                         in op `elem` reducedOps
+      in reduceTraceLogs' (if isRtl then tl:rtls else rtls) vals
     reducedOps =
       [ OpSTOP
       , OpCALL
@@ -307,6 +323,7 @@ reduceTraceLogs values =
       , OpSLOAD
       , OpSSTORE
       ]
+-}
 
 getDbInternalTxs :: BlockNum -> Int -> HexEthAddr -> [Tree RpcTraceLog]
                  -> ([MysqlTx],[MysqlTx])
@@ -391,9 +408,10 @@ opSelfdestruct = toOpcode OpSELFDESTRUCT
 insertMyTouchedAccountsDb ethUrl myCon blkNum rDacc = do
   let proto = ethProto publicEthProtoCfg blkNum
   when (proto `elem` enumFrom SpuriousDragon) $ do
-    let txIdxs = sort $ nub $ map (\(MyTouchedAccount _ txIdx _) -> txIdx) rDacc
-    let txIdxAddrs = map (\txIdx -> (txIdx,nub $ map (\(MyTouchedAccount _ _ to) -> to) $ filter (\(MyTouchedAccount _ txIdx' _) -> txIdx == txIdx') rDacc)) txIdxs
-    rDacc' <- concat <$> mapM (\(txIdx,addrs) ->
+    let rDacc1 = nubBy (\(MyTouchedAccount _ _ to1) (MyTouchedAccount _ _ to2) -> to1 == to2) rDacc
+    let txIdxs = sort $ nub $ map (\(MyTouchedAccount _ txIdx _) -> txIdx) rDacc1
+    let txIdxAddrs = map (\txIdx -> (txIdx,nub $ map (\(MyTouchedAccount _ _ to) -> to) $ filter (\(MyTouchedAccount _ txIdx' _) -> txIdx == txIdx') rDacc1)) txIdxs
+    rDacc2 <- concat <$> mapM (\(txIdx,addrs) ->
                 if null addrs
                   then return []
                   else do
@@ -405,7 +423,7 @@ insertMyTouchedAccountsDb ethUrl myCon blkNum rDacc = do
                         let addrs3 = filter (\addr -> not $ addr `elem` addrs2) addrs1
                         return $ map (MyTouchedAccount blkNum txIdx) addrs3
                 ) txIdxAddrs
-    unless (null rDacc') $ dbInsertDeadAccounts myCon rDacc'
+    unless (null rDacc2) $ dbInsertDeadAccounts myCon rDacc2
 
 insertMyTouchedAccountDb ethUrl myCon mtx = case mtx of
   (MyTouchedAccount blkNum txIdx addr) -> do
@@ -461,6 +479,55 @@ accountHasNonce myCon blkNum txIdx addr = do
     then return True
     else dbSelectContractCreationHasFrom myCon blkNum txIdx addr
 
+accountNonce myCon addr = (+)
+                      <$> dbSelectMsgCallCountFrom myCon addr
+                      <*> dbSelectContractCreationCountFrom myCon addr
+
+updateCodeDb doTest myUrl myPort ethUrl mIniBlk numBlks iniDb = do
+  (greet,myCon) <- connectDetail (defConInfo myUrl myPort)
+  printErr greet
+  when iniDb $ dbCreateTableContractCode myCon
+  iniBlk <- maybe (maybe 1 (+1) <$> dbSelectContractCodeLastBlkNum myCon) return mIniBlk
+  txsNew <- dbSelectContractCreationFromBlkNum myCon (iniBlk+1) (iniBlk+numBlks)
+  itxsNew <- dbSelectInternalTxFromBlkNum myCon (iniBlk+1) (iniBlk+numBlks) opCreate
+  let blksMtxsNew = joinNews (txsNew ++ itxsNew)
+  mapM_ (\blkMtxs -> ignoreCtrlC
+                   $ withTransaction myCon
+                   $ mapM_ (insertBlockContractCodeDb myCon ethUrl) blkMtxs
+    ) blksMtxsNew
+  close myCon
+
+joinNews = map (nubBy eqMtxBlkNumAddr)
+         . groupBy eqMtxBlkNum
+         . sortBy (comparing mtxIdx)
+  where
+    eqMtxBlkNumAddr mtx1 mtx2 = (mtxBlkNumAddr mtx1) == (mtxBlkNumAddr mtx2)
+    mtxBlkNumAddr mtx = case mtx of
+      MyContractCreation blkNum _ _ addr -> (blkNum,addr)
+      MyInternalTx blkNum _ _ _ addr _ -> (blkNum,addr)
+      _ -> error $ "mtxBlkNumAddr: " ++ show mtx
+    eqMtxBlkNum mtx1 mtx2 = (mtxBlkNum mtx1) == (mtxBlkNum mtx2)
+    mtxBlkNum mtx = case mtx of
+      MyContractCreation blkNum _ _ _ -> blkNum
+      MyInternalTx blkNum _ _ _ _ _ -> blkNum
+      _ -> error $ "mtxBlkNum: " ++ show mtx
+    mtxIdx mtx = case mtx of
+      MyContractCreation blkNum txIdx _ _ -> (blkNum,txIdx,0)
+      MyInternalTx blkNum txIdx idx _ _ _ -> (blkNum,txIdx,idx+1)
+      _ -> error $ "mtxIdx: " ++ show mtx
+
+insertBlockContractCodeDb myCon ethUrl mtx = do
+  let (blkNum,txIdx,addr) = mtxGetCodeInfo mtx
+  failedTx <- dbSelectTxFailed myCon blkNum txIdx
+  unless failedTx $ do
+    code <- getCode ethUrl blkNum addr
+    let mBzzr0 = getBinBzzr0 code
+    dbInsertContractCode myCon blkNum addr mBzzr0 code
+
+mtxGetCodeInfo mtx = case mtx of
+  MyContractCreation blkNum txIdx _ addr -> (blkNum,txIdx,addr)
+  MyInternalTx blkNum txIdx _ _ addr _ -> (blkNum,txIdx,addr)
+
 fromRight _ (Right r) = r
 fromRight t (Left e) = error $ show t ++ ": " ++ show e
 
@@ -501,10 +568,6 @@ getTransactionReceipt ethUrl txHash =
 getBlockByNumber ethUrl blkNum = fromJust . fromRight "eth_getBlockByNumber"
                              <$> runWeb3 False ethUrl
                                    (eth_getBlockByNumber (RPBNum blkNum) True)
-accountNonce myCon addr = (+)
-                      <$> dbSelectMsgCallCountFrom myCon addr
-                      <*> dbSelectContractCreationCountFrom myCon addr
-
 dumpBlock ethUrl blkNum = fromRight "debug_dumpBlock"
                       <$> runWeb3 False ethUrl (debug_dumpBlock blkNum)
 
