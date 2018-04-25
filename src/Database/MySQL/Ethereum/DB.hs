@@ -212,7 +212,7 @@ dbSelectLatestBlockNum myCon = do
   (colDefs,isValues) <- query_ myCon selectLatestBlockQ
   readMaybeVal isValues myGetNum
 
-createTableTxsQ = "create table txs (blkNum integer unsigned not null, txIdx smallint unsigned not null, txHash binary(32) not null, txValue binary(32) not null, gas integer unsigned not null, failed boolean not null, maskOpcodes bit(64) not null, primary key (blkNum,txIdx));"
+createTableTxsQ = "create table txs (blkNum integer unsigned not null, txIdx smallint unsigned not null, txHash binary(32) not null, txValue binary(32) not null, gas integer unsigned not null, failed boolean not null, maskOpcodes bit(64) not null, primary key (blkNum,txIdx), foreign key (blkNum) references blocks (blkNum));"
 createIndexTxHashQ = "create index txHash on txs (txHash);"
 insertTxQ = "insert into txs (blkNum,txIdx,txHash,txValue,gas,failed,maskOpcodes) value (?,?,?,?,?,?,?);"
 insertTxP blkNum txIdx txHash value gas failed mop =
@@ -251,7 +251,7 @@ selectTableFroms tNom myCon blkNum txIdx addrs = do
                           (selectTableFromsP blkNum txIdx addrs)
   map (myGetAddr . head) <$> myReadAndSkipToEof isValues
 
-createTableMsgCallsQ = "create table msgCalls (blkNum integer unsigned not null, txIdx smallint unsigned not null, fromA binary(20) not null, toA binary(20) not null, primary key (blkNum,txIdx));"
+createTableMsgCallsQ = "create table msgCalls (blkNum integer unsigned not null, txIdx smallint unsigned not null, fromA binary(20) not null, toA binary(20) not null, primary key (blkNum,txIdx), foreign key (blkNum,txIdx) references txs (blkNum,txIdx));"
 createIndexMsgCallFromQ = "create index msgCallFrom on msgCalls (fromA);"
 createIndexMsgCallToQ = "create index msgCallTo on msgCalls (toA);"
 insertMsgCallQ = "insert into msgCalls (blkNum,txIdx,fromA,toA) value (?,?,?,?);"
@@ -289,7 +289,7 @@ dbSelectMsgCallCountFrom myCon blkNum txIdx addr = do
                           (selectMsgCallCountFromP blkNum txIdx addr)
   maybe 0 id <$> readMaybeVal isValues myGetNum
 
-createTableContractCreationsQ = "create table contractCreations (blkNum integer unsigned not null, txIdx smallint unsigned not null, fromA binary(20) not null, contractA binary(20) not null, primary key (blkNum,txIdx));"
+createTableContractCreationsQ = "create table contractCreations (blkNum integer unsigned not null, txIdx smallint unsigned not null, fromA binary(20) not null, contractA binary(20) not null, primary key (blkNum,txIdx), foreign key (blkNum,txIdx) references txs (blkNum,txIdx));"
 createIndexContractCreationFromQ = "create index contractCreationFrom on contractCreations (fromA);"
 createIndexContractCreationContractQ = "create index contractCreationContract on contractCreations (contractA);"
 insertContractCreationQ = "insert into contractCreations (blkNum,txIdx,fromA,contractA) value (?,?,?,?);"
@@ -340,7 +340,7 @@ getMyContractCreation [vBlkNum,vTxIdx,vFromA,vContractA] =
   MyContractCreation (myGetNum vBlkNum) (myGetNum vTxIdx)
                      (myGetAddr vFromA) (myGetAddr vContractA)
 
-createTableInternalTxsQ = "create table internalTxs (blkNum integer unsigned not null, txIdx smallint unsigned not null, idx mediumint unsigned not null, fromA binary(20) not null, addr binary(20) not null, opcode tinyint unsigned not null, primary key (blkNum,txIdx,idx));"
+createTableInternalTxsQ = "create table internalTxs (blkNum integer unsigned not null, txIdx smallint unsigned not null, idx mediumint unsigned not null, fromA binary(20) not null, addr binary(20) not null, opcode tinyint unsigned not null, primary key (blkNum,txIdx,idx), foreign key (blkNum,txIdx) references txs (blkNum,txIdx));"
 createIndexInternalTxFromQ = "create index internalTxFrom on internalTxs (fromA);"
 createIndexInternalTxAddrQ = "create index internalTxAddr on internalTxs (addr);"
 insertInternalTxQ = "insert into internalTxs (blkNum,txIdx,idx,fromA,addr,opcode) value (?,?,?,?,?,?);"
@@ -393,7 +393,7 @@ opCallcode = toOpcode OpCALLCODE
 opDelegatecall = toOpcode OpDELEGATECALL
 
 
-createDeadAccountsQ = "create table deadAccounts (blkNum integer unsigned not null, txIdx smallint unsigned not null, addr binary(20) not null, primary key (addr));"
+createDeadAccountsQ = "create table deadAccounts (blkNum integer unsigned not null, txIdx smallint unsigned not null, addr binary(20) not null, primary key (addr), foreign key (blkNum,txIdx) references txs (blkNum,txIdx));"
 insertDeadAccountQ = "insert into deadAccounts (blkNum,txIdx,addr) value (?,?,?);"
 insertDeadAccountP blkNum txIdx addr = 
   [ mySetBlkNum blkNum
@@ -532,22 +532,23 @@ dbCreateDB = do
   close myCon
 
 
-createContractCodeQ = "create table contractsCode (blkNum integer unsigned not null, addr binary(20) not null, bzzr0 binary(32), code mediumblob not null, primary key (blkNum,addr));"
+createContractCodeQ = "create table contractsCode (blkNum integer unsigned not null, txIdx smallint unsigned not null, addr binary(20) not null, bzzr0 binary(32), code mediumblob not null, primary key (blkNum,addr));"
 createIndexBzzr0Q = "create index contractCodeBzzr0 on contractsCode (bzzr0);"
 selectContractCodeLastBlkNumQ = "select blkNum from contractsCode order by blkNum desc limit 1;"
 dbSelectContractCodeLastBlkNum myCon = do
   (colDefs,isValues) <- query_ myCon selectContractCodeLastBlkNumQ
   readMaybeVal isValues myGetNum
-insertContractCodeQ = "insert into contractsCode (blkNum,addr,bzzr0,code) value (?,?,?,?);"
-insertContractCodeP blkNum addr mBzzr0 code =
+insertContractCodeQ = "insert into contractsCode (blkNum,txIdx,addr,bzzr0,code) value (?,?,?,?,?);"
+insertContractCodeP blkNum txIdx addr mBzzr0 code =
   [ mySetBlkNum blkNum
+  , mySetTxIdx txIdx
   , mySetAddr addr
   , maybe MySQLNull mySetHexData mBzzr0
   , mySetHexData code
   ]
-dbInsertContractCode myCon blkNum addr mBzzr0 code = do
-  print ("code", blkNum, addr, mBzzr0, code)
-  execute myCon insertContractCodeQ (insertContractCodeP blkNum addr mBzzr0 code) >>= printErr
+dbInsertContractCode myCon blkNum txIdx addr mBzzr0 code = do
+  print ("code", blkNum, txIdx, addr, mBzzr0, code)
+  execute myCon insertContractCodeQ (insertContractCodeP blkNum txIdx addr mBzzr0 code) >>= printErr
 
 dbCreateTableContractCode :: MySQLConn -> IO ()
 dbCreateTableContractCode myCon = do
