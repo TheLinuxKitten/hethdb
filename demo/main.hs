@@ -124,7 +124,7 @@ testLongQ myUrl myPort = do
 testLongTrace ethUrl = do
   --traceTx <- getTraceTx ethUrl "0x79f03e00803211ae61f7a63c6840aafd3d011252a46dfeb56293e923bca0140d"
   traceTx <- getTraceTx ethUrl "0xa5080c8060cebd905fd9eac05ddd514a9a7904e770d75f85c5b03c2e1f88ac02"
-  let rLogs = snd $ reduceTraceLogs $ force $ traceValueTxLogs traceTx
+  let rLogs = traceValueTxLogs traceTx
   print rLogs
   print $ traceTxTree rLogs
   --print traceTx
@@ -177,13 +177,10 @@ insertBlockDb doTest ethUrl myCon doPar blkNum = do
       mapM_ (\(POObject tx) -> do
         txTrace <- getTraceTx ethUrl (btxHash tx)
         let tls = traceValueTxLogs txTrace
-        let rtls = snd $ reduceTraceLogs tls
         print "1 --------------------------------------------------------"
-        mapM_ print tls
+        mapM_ (print . tl2tup) $ map traceLogFromJSON tls
         print "2 --------------------------------------------------------"
-        mapM_ (print . tl2tup) rtls
-        print "3 --------------------------------------------------------"
-        putStrLn $ drawForest $ map (fmap (show . tl2tup)) $ traceTxTree rtls
+        putStrLn $ drawForest $ map (fmap (show . tl2tup)) $ snd $ traceTxTree tls
         ) (getTxs blk)
       let txs = sort $ nub $ map (\(MyTouchedAccount _ txIdx _) -> txIdx) rDacc
       let txAddrs = map (\txIdx -> (txIdx,map (\(MyTouchedAccount _ _ to) -> to) $ filter (\(MyTouchedAccount _ txIdx' _) -> txIdx == txIdx') rDacc)) txs
@@ -250,7 +247,7 @@ getDbTx ethUrl (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto txVal
   let failed1 = traceValueTxFailed txTrace
   let (mop,tls) = if failed1
                     then (0,[])
-                    else reduceTraceLogs $ traceValueTxLogs txTrace
+                    else traceTxTree $ traceValueTxLogs txTrace
   let failed = failed1 || mop `hasOp` OpINVALID
   let mtx1 = MyTx blkNum txIdx txHash txValue txGas failed mop
   (mtx2,mdas2,cAddr) <- case mto of
@@ -264,48 +261,32 @@ getDbTx ethUrl (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto txVal
       let mda = MyTouchedAccount blkNum txIdx to
       return (mtx,[mda],to)
   let (mtxs3,mdas3) = if not failed && not (mop `hasOp` OpREVERT)
-                        then getDbInternalTxs
-                                blkNum txIdx cAddr $ traceTxTree tls
+                        then getDbInternalTxs blkNum txIdx cAddr tls
                         else ([],[])
   return (mtx1,mtx2,mdas2,(mtxs3,mdas3))
-
-valuesMaskOps :: [Value] -> Word64
-valuesMaskOps = traceMaskOps . map valueOp
-  where
-    valueOp = fromText . traceLogOp . traceLogFromJSON
 
 traceLogFromJSON :: Value -> RpcTraceLog
 traceLogFromJSON = (\(Success a) -> a) . fromJSON
 
-traceTxTree :: [RpcTraceLog] -> [Tree RpcTraceLog]
-traceTxTree = traceTxTree' [[]] 1
+traceTxTree :: [Value] -> (Word64,[Tree RpcTraceLog])
+traceTxTree = traceTxVal ([],[[]]) 1
   where
-    traceTxTree' [[]] _ [] = []
-    traceTxTree' (forest:[]) _ [] = reverse forest
-    traceTxTree' (forest:calls) depth (t@(RpcTraceLog d me _ _ _ op _ _ _):ts)
-      | depth == d = traceTxTree' ((Node t []:forest):calls) d ts
-      | depth < d = traceTxTree' ([Node t []]:forest:calls) d ts
+    traceTxVal (ops,forest:[]) _ [] = (traceMaskOps ops,reverse forest)
+    traceTxVal ret depth (v:vs) = traceTx ret depth (traceLogFromJSON v) v vs
+    traceTx (ops,forest:calls) depth t@(RpcTraceLog d me _ _ _ op _ _ _) v vs
+      | depth == d = let op' = fromText op
+                         forest' = if op' `elem` reducedOps
+                                     then (Node t []:forest)
+                                     else forest
+                     in traceTxVal (op':ops,forest':calls) d vs
+      | depth < d = traceTxVal (fromText op:ops,[Node t []]:forest:calls) d vs
       | depth > d = let (Node tp _:forest') = head calls
                         calls' = tail calls
-                        ts' = if depth - 1 == d
-                                then ts
-                                else t:ts
-                    in traceTxTree' ((Node t []:Node tp (reverse forest):forest'):calls') (depth - 1) ts'
-
-reduceTraceLogs :: [Value] -> (Word64,[RpcTraceLog])
-reduceTraceLogs values =
-  let tls = map traceLogFromJSON values
-  in (traceMaskOps $ map (fromText . traceLogOp) tls,tls)
-{-reduceTraceLogs = reduceTraceLogs' (True,[])
-  where
-    reduceTraceLogs' (es1,rtls) [] = reverse rtls
-    reduceTraceLogs' (es1,rtls) (val:vals) =
-      let isRtl = if es1
-                    then True
-                    else let tl = traceLogFromJSON val
-                             op = fromText $ traceLogOp tl
-                         in op `elem` reducedOps
-      in reduceTraceLogs' (if isRtl then tl:rtls else rtls) vals
+                        vs' = if depth - 1 == d
+                                then vs
+                                else v:vs
+                        res = (Node t []:Node tp (reverse forest):forest'):calls'
+                    in traceTxVal (fromText op:ops,res) (depth - 1) vs'
     reducedOps =
       [ OpSTOP
       , OpCALL
@@ -323,7 +304,6 @@ reduceTraceLogs values =
       , OpSLOAD
       , OpSSTORE
       ]
--}
 
 getDbInternalTxs :: BlockNum -> Int -> HexEthAddr -> [Tree RpcTraceLog]
                  -> ([MysqlTx],[MysqlTx])
@@ -491,22 +471,20 @@ updateCodeDb doTest myUrl myPort ethUrl mIniBlk numBlks iniDb = do
   txsNew <- dbSelectContractCreationFromBlkNum myCon (iniBlk+1) (iniBlk+numBlks)
   itxsNew <- dbSelectInternalTxFromBlkNum myCon (iniBlk+1) (iniBlk+numBlks) opCreate
   let blksMtxsNew = joinNews (txsNew ++ itxsNew)
-  mapM_ (\blkMtxs -> ignoreCtrlC
-                   $ withTransaction myCon
-                   $ mapM_ (insertBlockContractCodeDb myCon ethUrl) blkMtxs
+  mapM_ ( ignoreCtrlC
+        . withTransaction myCon
+        . mapM_ (insertBlockContractCodeDb myCon ethUrl)
     ) blksMtxsNew
   close myCon
 
-joinNews = map (nubBy eqMtxBlkNumAddr)
-         . groupBy eqMtxBlkNum
-         . sortBy (comparing mtxIdx)
+joinNews = groupBy eqMtxBlkNum . sortBy (comparing mtxIdx)
   where
-    eqMtxBlkNumAddr mtx1 mtx2 = (mtxBlkNumAddr mtx1) == (mtxBlkNumAddr mtx2)
+    eqMtxBlkNumAddr mtx1 mtx2 = mtxBlkNumAddr mtx1 == mtxBlkNumAddr mtx2
     mtxBlkNumAddr mtx = case mtx of
       MyContractCreation blkNum _ _ addr -> (blkNum,addr)
       MyInternalTx blkNum _ _ _ addr _ -> (blkNum,addr)
       _ -> error $ "mtxBlkNumAddr: " ++ show mtx
-    eqMtxBlkNum mtx1 mtx2 = (mtxBlkNum mtx1) == (mtxBlkNum mtx2)
+    eqMtxBlkNum mtx1 mtx2 = mtxBlkNum mtx1 == mtxBlkNum mtx2
     mtxBlkNum mtx = case mtx of
       MyContractCreation blkNum _ _ _ -> blkNum
       MyInternalTx blkNum _ _ _ _ _ -> blkNum
@@ -522,7 +500,7 @@ insertBlockContractCodeDb myCon ethUrl mtx = do
   unless failedTx $ do
     code <- getCode ethUrl blkNum addr
     let mBzzr0 = getBinBzzr0 code
-    dbInsertContractCode myCon blkNum addr mBzzr0 code
+    dbInsertContractCode myCon blkNum txIdx addr mBzzr0 code
 
 mtxGetCodeInfo mtx = case mtx of
   MyContractCreation blkNum txIdx _ addr -> (blkNum,txIdx,addr)
