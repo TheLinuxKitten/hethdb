@@ -14,20 +14,23 @@
 
 module Main where
 
+import Control.Arrow ((&&&))
 import Control.Concurrent (threadDelay)
 import Control.DeepSeq (NFData(..),deepseq,force)
-import Control.Monad (filterM,unless,when)
+import Control.Monad (filterM,foldM,unless,when)
 import Control.Monad.IO.Class
 import Control.Parallel.Strategies (parList,rdeepseq,withStrategy)
 import Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
+import Data.Either (isRight)
 import Data.Ethereum.EthProto
 import Data.Ethereum.EvmDisasm
 import Data.Ethereum.EvmOp
 import qualified Data.Ethereum.RLP as RLP
+import qualified Data.HashMap.Lazy as HM
 import Data.Maybe (fromJust, isJust)
-import Data.List (groupBy,nub,nubBy,sort,sortBy)
+import Data.List (groupBy,nub,nubBy,partition,sort,sortBy)
 import Data.Monoid ((<>))
 import Data.Ord (comparing)
 import qualified Data.Text as T
@@ -35,11 +38,19 @@ import Data.Tree
 import Data.Word (Word8,Word32,Word64)
 import Database.MySQL.Base
 import Database.MySQL.Ethereum.DB
+import Network.JsonRpcCliHttp (Request)
 import Network.JsonRpcConn (LogLevel(..), filterLoggerLogLevel)
 import Network.Web3
 import Network.Web3.Dapp.Bytes
-import Network.Web3.Dapp.EthABI (keccak256)
+import Network.Web3.Dapp.ERC20
+import Network.Web3.Dapp.ERC20.Interface
+import Network.Web3.Dapp.EthABI (keccak256,topicNull)
 import Network.Web3.Dapp.EthABI.Bzz (getBinBzzr0)
+import Network.Web3.Dapp.EthABI.Types
+  ( Interface(IEvent)
+  , ToCanonical(..)
+  , isInterfaceEvent
+  )
 import Network.Web3.Dapp.Int
 import System.Environment (getArgs,getProgName)
 import System.IO
@@ -55,17 +66,17 @@ import System.IO
 import qualified System.IO.Streams as IOS
 import System.Posix.Signals
 
-getOps :: IO (String,Integer,String,Maybe String,Maybe BlockNum,BlockNum,Bool,Bool,Bool,Bool)
+getOps :: IO (String,Integer,String,Maybe String,Maybe BlockNum,Maybe BlockNum,Bool,Bool,Bool,Bool)
 getOps = do
   prog <- getProgName
-  go prog ("localhost",3306,"http://localhost:8545",Nothing,Nothing,100,False,False,False,False) <$> getArgs
+  go prog ("localhost",3306,"http://localhost:8545",Nothing,Nothing,Nothing,False,False,False,False) <$> getArgs
   where
     go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--myHttp":a:as) = go p (a,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) as
     go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--myPort":a:as) = go p (myUrl,read a,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) as
     go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--ethHttp":a:as) = go p (myUrl,myPort,a,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) as
     go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--cmd":a:as) = go p (myUrl,myPort,ethUrl,Just a,mIniBlk,numBlks, iniDb,doPar,doLog,doTest) as
     go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--iniBlk":a:as) = go p (myUrl,myPort,ethUrl,mCmd,Just $ read a, numBlks, iniDb,doPar,doLog,doTest) as
-    go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--numBlks":a:as) = go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,read a,iniDb,doPar,doLog,doTest) as
+    go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--numBlks":a:as) = go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,Just $ read a,iniDb,doPar,doLog,doTest) as
     go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--initDb":as) = go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks, True,doPar,doLog,doTest) as
     go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--par":as) = go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks, iniDb,True,doLog,doTest) as
     go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) ("--log":as) = go p (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks, iniDb,doPar,True,doTest) as
@@ -82,12 +93,13 @@ printErr = hPrint stderr
 
 main :: IO ()
 main = do
-  (myUrl,myPort,ethUrl,mCmd,mIniBlk,numBlks,iniDb,doPar,doLog,doTest) <- getOps
+  (myUrl,myPort,ethUrl,mCmd,mIniBlk,mNumBlks,iniDb,doPar,doLog,doTest) <- getOps
   case mCmd of
-    Nothing -> updateDb doTest myUrl myPort ethUrl doPar mIniBlk numBlks iniDb
+    Nothing -> updateDb doTest myUrl myPort ethUrl doPar mIniBlk (maybe 100 id mNumBlks) iniDb
     Just cmd -> case cmd of
       "disasm" -> disasmStdin
-      "updateCode" -> updateCodeDb doTest myUrl myPort ethUrl mIniBlk numBlks iniDb
+      "updateCode" -> updateCodeDb doTest myUrl myPort ethUrl mIniBlk (maybe 100 id mNumBlks) iniDb
+      "updateErc20" -> updateErc20Db doTest myUrl myPort ethUrl mIniBlk mNumBlks iniDb
       _ -> error $ "Comando no reconocido: " ++ cmd
   {-if doTest
     then tests myUrl myPort ethUrl iniBlk numBlks doLog
@@ -126,7 +138,7 @@ testLongTrace ethUrl = do
   traceTx <- getTraceTx ethUrl "0xa5080c8060cebd905fd9eac05ddd514a9a7904e770d75f85c5b03c2e1f88ac02"
   let rLogs = traceValueTxLogs traceTx
   print rLogs
-  print $ traceTxTree rLogs
+  print $ traceTxTree True rLogs
   --print traceTx
 
 getTxs = sortTxs . rebTransactions
@@ -149,8 +161,10 @@ insertBlockGenesis ethUrl myCon = do
   accs <- stateAccounts <$> dumpBlock ethUrl 0
   mapM_ (\acc -> dbInsertGenesis myCon (accAddr acc) (accBalance acc)) accs
 
+getLastBlkNumSucc f myCon mIniBlk = maybe (maybe 1 (+1) <$> f myCon) return mIniBlk
+
 insertBlocksDb doTest mIniBlk numBlks ethUrl myCon doPar = do
-  iniBlk <- maybe (maybe 1 (+1) <$> dbSelectLatestBlockNum myCon) return mIniBlk
+  iniBlk <- getLastBlkNumSucc dbSelectLatestBlockNum myCon mIniBlk
   let blks = map (iniBlk+) [0 .. numBlks-1]
   mapM_ (insertBlockDb doTest ethUrl myCon doPar) blks
 
@@ -180,7 +194,7 @@ insertBlockDb doTest ethUrl myCon doPar blkNum = do
         print "1 --------------------------------------------------------"
         mapM_ (print . tl2tup) $ map traceLogFromJSON tls
         print "2 --------------------------------------------------------"
-        putStrLn $ drawForest $ map (fmap (show . tl2tup)) $ snd $ traceTxTree tls
+        putStrLn $ drawForest $ map (fmap (show . tl2tup)) $ snd $ traceTxTree True tls
         ) (getTxs blk)
       let txs = sort $ nub $ map (\(MyTouchedAccount _ txIdx _) -> txIdx) rDacc
       let txAddrs = map (\txIdx -> (txIdx,map (\(MyTouchedAccount _ _ to) -> to) $ filter (\(MyTouchedAccount _ txIdx' _) -> txIdx == txIdx') rDacc)) txs
@@ -198,10 +212,25 @@ insertBlockDb doTest ethUrl myCon doPar blkNum = do
           dbInsertInternalTxs myCon rItx
           insertMyTouchedAccountsDb ethUrl myCon blkNum rDacc
         withTransaction myCon $ do
-          let mtxsNew = joinNews (rNew ++ filter (\(MyInternalTx _ _ _ _ _ opcode) -> opcode == opCreate) rItx)
+          let mtxsNew = joinNews (rNew ++ filter (\(MyInternalTx _ _ _ _ _ op) -> op == OpCREATE) rItx)
           mapM_ (mapM_ (insertBlockContractCodeDb myCon ethUrl)) mtxsNew
+          (newErc20s,newNoErc20s,hErc20logs) <- getErc20Db myCon ethUrl blkNum blkNum
+          insertErc20Db myCon newErc20s newNoErc20s hErc20logs
   where
     tl2tup tl = (traceLogDepth tl, traceLogOp tl)
+
+getErc20Addrs myCon mtxs = do
+  let addrsTo = nub $ map getCallAddrTo $ filter isCallMtx mtxs
+  map (\(_,_,addr,_,_,_,_) -> addr) <$> dbSelectErc20Addrs myCon addrsTo
+  where
+    isCallMtx MyMsgCall{} = True
+    isCallMtx (MyInternalTx _ _ _ _ _ op) = case op of
+      OpCALL -> True
+      OpCALLCODE -> True
+      OpDELEGATECALL -> True
+      _ -> False
+    getCallAddrTo (MyMsgCall _ _ _ toA) = toA
+    getCallAddrTo (MyInternalTx _ _ _ _ addr _) = addr
 
 spanDbTxs = reverseDbTxs . foldl spanMyTxs ([],[],[],[],[])
 reverseDbTxs (rTx,rNew,rCall,rItx,rDacc) =
@@ -247,7 +276,7 @@ getDbTx ethUrl (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto txVal
   let failed1 = traceValueTxFailed txTrace
   let (mop,tls) = if failed1
                     then (0,[])
-                    else traceTxTree $ traceValueTxLogs txTrace
+                    else traceTxTree True $ traceValueTxLogs txTrace
   let failed = failed1 || mop `hasOp` OpINVALID
   let mtx1 = MyTx blkNum txIdx txHash txValue txGas failed mop
   (mtx2,mdas2,cAddr) <- case mto of
@@ -268,14 +297,14 @@ getDbTx ethUrl (RpcEthBlkTx txHash _ _ (Just blkNum) (Just txIdx) from mto txVal
 traceLogFromJSON :: Value -> RpcTraceLog
 traceLogFromJSON = (\(Success a) -> a) . fromJSON
 
-traceTxTree :: [Value] -> (Word64,[Tree RpcTraceLog])
-traceTxTree = traceTxVal ([],[[]]) 1
+traceTxTree :: Bool -> [Value] -> (Word64,[Tree RpcTraceLog])
+traceTxTree doReduce = traceTxVal ([],[[]]) 1
   where
     traceTxVal (ops,forest:[]) _ [] = (traceMaskOps ops,reverse forest)
     traceTxVal ret depth (v:vs) = traceTx ret depth (traceLogFromJSON v) v vs
     traceTx (ops,forest:calls) depth t@(RpcTraceLog d me _ _ _ op _ _ _) v vs
       | depth == d = let op' = fromText op
-                         forest' = if op' `elem` reducedOps
+                         forest' = if not doReduce || op' `elem` reducedOps
                                      then (Node t []:forest)
                                      else forest
                      in traceTxVal (op':ops,forest':calls) d vs
@@ -315,8 +344,8 @@ getDbInternalTxs blkNum txIdx cAddr treeTraceLogs =
       mdas = map (MyTouchedAccount blkNum txIdx) tchs'
   in (mtxs,mdas)
   where
-    getDbInternalTx (idx,from,to,opcode) =
-      MyInternalTx blkNum txIdx idx from to opcode
+    getDbInternalTx (idx,from,to,op) =
+      MyInternalTx blkNum txIdx idx from to op
     getItxs idx addr forest = foldl getItx ([],[],idx,addr,forest) forest
     getItx (r,tchs,idx,addr,_:ts) t =
       let (RpcTraceLog _ _ _ _ _ opStr _ mstack _) = rootLabel t
@@ -325,29 +354,29 @@ getDbInternalTxs blkNum txIdx cAddr treeTraceLogs =
             OpCALL ->
               let (_:to:_) = getStack mstack
                   (to',tch) = stackAddr' to
-              in (to',Just (idx,addr,to',opCall),tch)
+              in (to',Just (idx,addr,to',op),tch)
             OpCALLCODE ->
               let (_:to:_) = getStack mstack
                   (to',tch) = stackAddr' to
-              in (addr,Just (idx,addr,to',opCallcode),tch)
+              in (addr,Just (idx,addr,to',op),tch)
             OpDELEGATECALL ->
               let (_:to:_) = getStack mstack
                   (to',tch) = stackAddr' to
-              in (addr,Just (idx,addr,to',opDelegatecall),tch)
+              in (addr,Just (idx,addr,to',op),tch)
             OpSTATICCALL ->
               let (_:to:_) = getStack mstack
                   (to',tch) = stackAddr' to
-              in (to',Just (idx,addr,to',opStaticcall),tch)
+              in (to',Just (idx,addr,to',op),tch)
             {- OpREVERT -> -}
             OpCREATE ->
               let t' = rootLabel $ head ts
                   (to:_) = getStack (traceLogStack t')
                   (to',_) = stackAddr' to
-              in (to',Just (idx,addr,to',opCreate),Nothing)
+              in (to',Just (idx,addr,to',op),Nothing)
             OpSELFDESTRUCT ->
               let (to:_) = getStack mstack
                   (to',tch) = stackAddr' to
-              in (addr,Just (idx,addr,to',opSelfdestruct),tch)
+              in (addr,Just (idx,addr,to',op),tch)
             OpBALANCE ->
               let (acc:_) = getStack mstack
                   (_,tch) = stackAddr' acc
@@ -376,15 +405,6 @@ getDbInternalTxs blkNum txIdx cAddr treeTraceLogs =
       in (addr,tch)
     stackAddr = HexEthAddr . joinHex . T.drop (64-40) . stripHex
 
-opCreate = toOpcode OpCREATE
-opCall = toOpcode OpCALL
-opCallcode = toOpcode OpCALLCODE
-opDelegatecall = toOpcode OpDELEGATECALL
-opStaticcall = toOpcode OpSTATICCALL
-opRevert = toOpcode OpREVERT
-opInvalid = toOpcode OpINVALID
-opSelfdestruct = toOpcode OpSELFDESTRUCT
-
 insertMyTouchedAccountsDb ethUrl myCon blkNum rDacc = do
   let proto = ethProto publicEthProtoCfg blkNum
   when (proto `elem` enumFrom SpuriousDragon) $ do
@@ -396,12 +416,9 @@ insertMyTouchedAccountsDb ethUrl myCon blkNum rDacc = do
                   then return []
                   else do
                     addrs1 <- deadAccounts ethUrl myCon blkNum txIdx addrs
-                    if null addrs1
-                      then return []
-                      else do
-                        addrs2 <- dbSelectDeadAccountAddrs myCon addrs1
-                        let addrs3 = filter (\addr -> not $ addr `elem` addrs2) addrs1
-                        return $ map (MyTouchedAccount blkNum txIdx) addrs3
+                    addrs2 <- dbSelectDeadAccountAddrs myCon addrs1
+                    let addrs3 = filter (\addr -> addr `notElem` addrs2) addrs1
+                    return $ map (MyTouchedAccount blkNum txIdx) addrs3
                 ) txIdxAddrs
     unless (null rDacc2) $ dbInsertDeadAccounts myCon rDacc2
 
@@ -427,16 +444,11 @@ deadAccounts ethUrl myCon blkNum txIdx addrs = do
   addrs3 <- map fst . filter ((=="0x") . snd)
         <$> mapM (\addr -> getCode ethUrl blkNum addr
                             >>= \c -> return (addr,c)) addrs2
-  addrs4 <- if null addrs3
-              then return []
-              else do
-                addrs4a <- dbSelectMsgCallsFroms myCon blkNum txIdx addrs3
-                return $ filter (\addr -> not $ addr `elem` addrs4a) addrs3
-  if null addrs4
-    then return []
-    else do
-      addrs5a <- dbSelectContractCreationFroms myCon blkNum txIdx addrs4
-      return $ filter (\addr -> not $ addr `elem` addrs5a) addrs4
+  addrs4 <- do
+    addrs4a <- dbSelectMsgCallsFroms myCon blkNum txIdx addrs3
+    return $ filter (\addr -> addr `notElem` addrs4a) addrs3
+  addrs5a <- dbSelectContractCreationFroms myCon blkNum txIdx addrs4
+  return $ filter (\addr -> addr `notElem` addrs5a) addrs4
 
 isDeadAccount ethUrl myCon blkNum txIdx addr =
   if isReservedAddr addr
@@ -467,9 +479,9 @@ updateCodeDb doTest myUrl myPort ethUrl mIniBlk numBlks iniDb = do
   (greet,myCon) <- connectDetail (defConInfo myUrl myPort)
   printErr greet
   when iniDb $ dbCreateTableContractCode myCon
-  iniBlk <- maybe (maybe 1 (+1) <$> dbSelectContractCodeLastBlkNum myCon) return mIniBlk
-  txsNew <- dbSelectContractCreationFromBlkNum myCon (iniBlk+1) (iniBlk+numBlks)
-  itxsNew <- dbSelectInternalTxFromBlkNum myCon (iniBlk+1) (iniBlk+numBlks) opCreate
+  iniBlk <- getLastBlkNumSucc dbSelectContractCodeLastBlkNum myCon mIniBlk
+  txsNew <- dbSelectContractCreationFromBlkNum myCon iniBlk (iniBlk+numBlks)
+  itxsNew <- dbSelectInternalTxFromBlkNum myCon iniBlk (iniBlk+numBlks) OpCREATE
   let blksMtxsNew = joinNews (txsNew ++ itxsNew)
   mapM_ ( ignoreCtrlC
         . withTransaction myCon
@@ -505,6 +517,163 @@ insertBlockContractCodeDb myCon ethUrl mtx = do
 mtxGetCodeInfo mtx = case mtx of
   MyContractCreation blkNum txIdx _ addr -> (blkNum,txIdx,addr)
   MyInternalTx blkNum txIdx _ _ addr _ -> (blkNum,txIdx,addr)
+
+updateErc20Db doTest myUrl myPort ethUrl mIniBlk mNumBlks iniDb = do
+  (greet,myCon) <- connectDetail (defConInfo myUrl myPort)
+  printErr greet
+  when iniDb $ dbCreateTableErc20s myCon
+  -- continuar a partir del último bloque procesado
+  iniBlk <- getLastBlkNumSucc dbSelectErc20LogLastBlkNum myCon mIniBlk
+  lstBlk <- maybe (maybe 1 id <$> dbSelectLatestBlockNum myCon) (return . (+(iniBlk-1))) mNumBlks
+  (newErc20s,newNoErc20s,hLogs) <- getErc20Db myCon ethUrl iniBlk lstBlk
+  if doTest
+    then do
+      mapM_ print newNoErc20s
+      mapM_ print newErc20s
+      mapM_ (mapM_ print) $ HM.elems hLogs
+    else ignoreCtrlC $ withTransaction myCon $ do
+      insertErc20Db myCon newErc20s newNoErc20s hLogs
+  close myCon
+
+insertErc20Db myCon newErc20s newNoErc20s hErc20logs = do
+  insertTokenAppsDb myCon newErc20s
+  insertTokenAppsDb myCon newNoErc20s
+  mapM_ (dbInsertErc20Logs myCon . snd) $ HM.toList hErc20logs
+
+insertTokenAppsDb myCon =
+  mapM_ (\(blkNum,txIdx,addr,isErc20,mName,mSymbol,mDecimals) ->
+    dbInsertErc20 myCon blkNum txIdx addr isErc20 mName mSymbol mDecimals
+    )
+
+-- | El método para identificar los contracts que implementan un token es
+-- buscarlos en los events ERC20 de los logs:
+--  1 - obtener los events ERC20 de los logs
+--  2 - identificar las direcciones de nuevos contracts
+--  3 - asumir que los contracts pueden no seguir la especificación ERC20/EIP20
+--      rigurosamente
+--  4 - obtener información del token de los nuevos contracts
+getErc20Db myCon ethUrl iniBlk lstBlk = do
+  -- seleccionar (RPC) logs ERC20 desde iniBlk hasta lstBlk
+  hErc20logs <- spanLogsByAddr <$> getErc20Logs ethUrl iniBlk lstBlk
+  let logAddrs = sort $ HM.keys hErc20logs
+  -- seleccionar (DB) ERC20s de los logs anteriores
+  erc20s <- dbSelectErc20Addrs myCon logAddrs
+  let erc20sAddrs = map erc20GetAddr erc20s
+  -- obtener las direcciones no presentes en la DB
+  let newAddrs = filterNewAddrs erc20sAddrs logAddrs
+  -- seleccionar (DB) contractsCode de las nuevas direcciones
+  contCodes <- dbSelectContractCodeAddrs myCon newAddrs
+  -- filtrar los contract que tienen las funciones obligatorias
+  let erc20Sels = map (stripHex . toHex . erc20Selector)
+                $ HM.elems
+                $ HM.filter erc20IsFunction
+                $ HM.filter erc20IsRequired erc20Info
+  let (erc20Codes,noErc20Codes) = partition (\(_,_,_,_,code) -> all (\sel -> sel `T.isInfixOf` code) erc20Sels) contCodes
+  newErc20s <- getTokenInfo' True erc20Codes
+  newNoErc20s <- getTokenInfo' False noErc20Codes
+  return (newErc20s,newNoErc20s,hErc20logs)
+  where
+    getTokenInfo' isErc20 codes = sortByBlkNumTxIdx
+                              <$> getTokenInfo ethUrl isErc20 codes
+    sortByBlkNumTxIdx = sortBy (\(b1,i1,_,_,_,_,_) (b2,i2,_,_,_,_,_) ->
+      let c1 = compare b1 b2
+          c2 = compare i1 i2
+      in if c1==EQ then c2 else c1)
+
+filterNewAddrs addrs = filter (\addr -> addr `notElem` addrs)
+
+spanLogsByAddr = spanMtxsByAddr erc20LogGetAddr
+
+contractCodeGetAddr (_,_,addr,_,_) = addr
+erc20GetAddr (_,_,addr,_,_,_,_) = addr
+erc20LogGetAddr (MyErc20Log _ _ addr _ _ _ _) = addr
+
+getAddrsErc20Logs :: String -> BlockNum -> BlockNum
+                  -> [HexEthAddr] -> IO [MysqlTx]
+getAddrsErc20Logs ethUrl iniBlk lstBlk addrs = do
+  getMyErc20Logs <$> getAddrLogs ethUrl iniBlk lstBlk addrs
+
+getErc20Logs :: String -> BlockNum -> BlockNum -> IO [MysqlTx]
+getErc20Logs ethUrl iniBlk lstBlk = do
+  getMyErc20Logs <$> getTopic0Logs ethUrl iniBlk lstBlk
+
+-- | Decodifica los events ERC20 de los logs
+getMyErc20Logs :: [RpcEthLog] -> [MysqlTx]
+getMyErc20Logs logs =
+  map getMyErc20Log
+    $ map (\(l,edl) -> (l,fromRight "getMyErc20Logs" edl))
+    $ filter (isRight . snd)
+    $ map (\(l,medl) -> (l,fromJust medl))
+    $ filter (isJust . snd)
+    $ map (\(l1,l2) -> (l1,eip20interface_decode_log l2))
+    $ zip logs logs
+  where
+    getMyErc20Log ((RpcEthLog _ _ mTxIdx _ _ mBlkNum addr _ _),ev) =
+      let (transfer,fromA,toA,amount) = getEvtInfo ev
+          blkNum = fromJust mBlkNum
+          txIdx = fromJust mTxIdx
+      in MyErc20Log blkNum txIdx addr transfer fromA toA amount
+    getEvtInfo ev = case ev of
+      EIP20Interface_Transfer (fromA,toA,amount) -> (True,fromA,toA,amount)
+      EIP20Interface_Approval (fromA,toA,amount) -> (False,fromA,toA,amount)
+
+getAddrLogs :: String -> BlockNum -> BlockNum
+            -> [HexEthAddr] -> IO [RpcEthLog]
+getAddrLogs ethUrl iniBlk lstBlk addrs =
+  map (\(EthFilterLog l) -> l) . fromRight "getLogs"
+    <$> runWeb3 False ethUrl
+          (eth_getLogs $ RpcEthFilter
+                           (Just $ RPBNum iniBlk)
+                           (Just $ RPBNum lstBlk)
+                           (Just addrs)
+                           Nothing)
+
+-- | Obtiene los logs de los events ERC20 en el rango de bloques. Los events
+-- ERC20 (Transfer y Approval) tienen dos argumentos `indexed`
+getTopic0Logs :: String -> BlockNum -> BlockNum -> IO [RpcEthLog]
+getTopic0Logs ethUrl iniBlk lstBlk =
+  map (\(EthFilterLog l) -> l) . fromRight "getTopic0Logs"
+    <$> runWeb3 False ethUrl
+          (eth_getLogs $ RpcEthFilter
+                           (Just $ RPBNum iniBlk)
+                           (Just $ RPBNum lstBlk)
+                           Nothing
+                           (Just [erc20Topics0,topicNull,topicNull]))
+  where
+    erc20Topics0 = EthFilterOrTopics
+                 $ map (EthFilterTopic . toHex . keccak256 . toCanonical)
+                 $ map (\(IEvent evt) -> evt)
+                 $ HM.elems
+                 $ HM.map erc20Interface
+                 $ HM.filter erc20IsEvent erc20Info
+
+getTokenInfo ethUrl isErc20 = mapM (\(blkNum,txIdx,addr,_,code) -> do
+  (mName,mSymbol,mDecimals) <- erc20GetTokenInfo ethUrl addr code
+  return (blkNum,txIdx,addr,isErc20,mName,mSymbol,mDecimals)
+  )
+
+-- | Obtiene la información del token si es posible. Intenta obtener el
+-- `name`, `symbol` y `decimals` llamando a las funciones, si están presentes
+-- en el código binario del contract y no falla la llamada.
+erc20GetTokenInfo :: String -> HexEthAddr -> Text
+                  -> IO (Maybe Text, Maybe Text, Maybe Uint8)
+erc20GetTokenInfo ethUrl addr code = do
+  name <- erc20_call "name" eip20interface_name_call
+  symbol <- erc20_call "symbol" eip20interface_symbol_call
+  decimals <- erc20_call "decimals" eip20interface_decimals_call
+  return (name, symbol, decimals)
+  where
+    erc20_call :: (FromJSON a)
+               => Text
+               -> ( HexEthAddr -> HexEthAddr
+                 -> Web3T Request (LoggingT IO) (Either Text a))
+               -> IO (Maybe a)
+    erc20_call nom f = do
+      let sel = stripHex $ toHex $ erc20Selector $ erc20Info HM.! nom
+      if sel `T.isInfixOf` code
+        then either (const Nothing) (either (const Nothing) Just)
+                <$> runWeb3 False ethUrl (f addr addr)
+        else return Nothing
 
 fromRight _ (Right r) = r
 fromRight t (Left e) = error $ show t ++ ": " ++ show e

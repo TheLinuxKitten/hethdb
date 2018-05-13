@@ -1,6 +1,8 @@
 DELIMITER //
   CREATE OR REPLACE PROCEDURE dropTables ()
   BEGIN
+    DROP TABLE erc20logs;
+    DROP TABLE erc20s;
     DROP TABLE contractsCode;
     DROP TABLE deadAccounts;
     DROP TABLE internalTxs;
