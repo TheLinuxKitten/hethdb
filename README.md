@@ -68,7 +68,9 @@ El método empleado en esta librería consiste en asumir que todo contract que i
 
     1. Se obtienen los logs emitidos por estos eventos
 
-    2. Las direcciones que emiten estos eventos son contracts que implementan un token. Estas implementaciones pueden o no cumplir la especificación ERC20/EIP20.
+    2. Las direcciones que emiten estos eventos son contracts que implementan
+       un token. Estas implementaciones pueden o no cumplir la especificación
+       ERC20/EIP20.
     
     3. Se obtiene el resto de información de cada token
 

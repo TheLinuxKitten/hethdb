@@ -17,38 +17,47 @@ module Database.MySQL.Ethereum.DB
   , dbInsertGenesis
   , dbInsertMyTx
   , dbSelectLatestBlockNum
+  -- ** Transacciones
   , dbInsertTxs
   , dbSelectTxFailed
+  -- ** Msg calls
   , dbInsertMsgCalls
   , dbSelectMsgCallsFroms
   , dbSelectMsgCallHasFrom
   , dbSelectMsgCallCountFrom
   , dbSelectMsgCallTxHashTo
+  -- ** Contract creations
   , dbInsertContractCreations
   , dbSelectContractCreationFroms
   , dbSelectContractCreationHasFrom
   , dbSelectContractCreationCountFrom
   , dbSelectContractCreationFromBlkNum
+  -- ** Internal transactions
   , dbInsertInternalTxs
   , dbSelectInternalTxCountAddr
   , dbSelectInternalTxFromBlkNum
+  -- ** Dead accounts
   , dbInsertDeadAccount
   , dbInsertDeadAccounts
   , dbSelectDeadAccountAddr
   , dbSelectDeadAccountAddrs
+  -- ** Mask EVM ops
   , traceLogsMaskOp
   , hasOp
   , traceMaskOps
   , maskGetOps
+  -- ** Contracts code
   , dbCreateTableContractCode
   , dbSelectContractCodeLastBlkNum
   , dbInsertContractCode
   , dbSelectContractCodeErc20
   , dbSelectContractCodeAddrs
+  -- ** ERC20s
   , dbCreateTableErc20s
   , dbInsertErc20
   , dbSelectErc20LastBlkNum
   , dbSelectErc20Addrs
+  -- ** ERC20 logs
   , dbSelectErc20LogLastBlkNum
   , dbInsertErc20Log
   , dbInsertErc20Logs
@@ -281,6 +290,10 @@ selectTxFailedP blkNum txIdx =
   [ mySetBlkNum blkNum
   , mySetTxIdx txIdx
   ]
+dbSelectTxFailed :: MySQLConn
+                 -> BlockNum    -- ^ Bloque
+                 -> Int         -- ^ Indice transacción
+                 -> IO Bool
 dbSelectTxFailed myCon blkNum txIdx = do
   (colDefs,isValues) <- query myCon selectTxFailedQ (selectTxFailedP blkNum txIdx)
   fromJust <$> readMaybeVal isValues myGetBool
@@ -316,6 +329,11 @@ insertMsgCall myCon blkNum txIdx fromA toA = do
   print ("call", blkNum, txIdx, fromA, toA)
   execute myCon insertMsgCallQ (insertMsgCallP blkNum txIdx fromA toA) >>= printErr
 dbInsertMsgCalls myCon = tableInsertMyTxs myCon "msgCalls" ["blkNum","txIdx","fromA","toA"]
+dbSelectMsgCallsFroms :: MySQLConn
+                      -> BlockNum       -- ^ Bloque
+                      -> Int            -- ^ Indice transacción
+                      -> [HexEthAddr]   -- ^ Direcciones
+                      -> IO [HexEthAddr]
 dbSelectMsgCallsFroms = selectTableFroms "msgCalls"
 selectMsgCallHasFromQ = "select * from msgCalls where fromA = ? and (blkNum < ? or (blkNum = ? and txIdx < ?)) limit 1;"
 selectMsgCallHasFromP blkNum txIdx addr =
@@ -324,6 +342,11 @@ selectMsgCallHasFromP blkNum txIdx addr =
   , mySetBlkNum blkNum
   , mySetTxIdx txIdx
   ]
+dbSelectMsgCallHasFrom :: MySQLConn
+                       -> BlockNum      -- ^ Bloque
+                       -> Int           -- ^ Indice transacción
+                       -> HexEthAddr    -- ^ Dirección
+                       -> IO Bool
 dbSelectMsgCallHasFrom myCon blkNum txIdx addr = do
   (colDefs,isValues) <- query myCon selectMsgCallHasFromQ
                           (selectMsgCallHasFromP blkNum txIdx addr)
@@ -335,6 +358,12 @@ selectMsgCallCountFromP blkNum txIdx addr =
   , mySetBlkNum blkNum
   , mySetTxIdx txIdx
   ]
+dbSelectMsgCallCountFrom :: Num a
+                         => MySQLConn
+                         -> BlockNum      -- ^ Bloque
+                         -> Int           -- ^ Indice transacción
+                         -> HexEthAddr    -- ^ Dirección
+                         -> IO a
 dbSelectMsgCallCountFrom myCon blkNum txIdx addr = do
   (colDefs,isValues) <- query myCon selectMsgCallCountFromQ
                           (selectMsgCallCountFromP blkNum txIdx addr)
@@ -577,6 +606,14 @@ dbCreateTables myCon = do
   execute_ myCon createIndexInternalTxFromQ >>= printErr
   execute_ myCon createIndexInternalTxAddrQ >>= printErr
   execute_ myCon createDeadAccountsQ >>= printErr
+  execute_ myCon createContractCodeQ >>= printErr
+  execute_ myCon createIndexBzzr0Q >>= printErr
+  execute_ myCon createErc20sQ >>= printErr
+  execute_ myCon createErc20LogsQ >>= printErr
+  execute_ myCon createIndexErc20LogsAddrQ >>= printErr
+  execute_ myCon createIndexErc20LogsFromQ >>= printErr
+  execute_ myCon createIndexErc20LogsToQ >>= printErr
+  execute_ myCon createIndexErc20LogsAmountQ >>= printErr
 
 dbCreateDB :: IO ()
 dbCreateDB = do
@@ -617,6 +654,10 @@ selectContractCodeErc20Q blkIni blkFin =
       blkIniQ = LC8.pack $ show blkIni
       blkFinQ = LC8.pack $ show blkFin
   in Query $ "select blkNum,txIdx,addr,bzzr0,code from contractsCode where blkNum >= " <> blkIniQ <> " and blkNum <= " <> blkFinQ <> " and " <> selsQ <> ";"
+dbSelectContractCodeErc20 :: MySQLConn
+                          -> BlockNum       -- ^ Bloque inicial
+                          -> BlockNum       -- ^ Bloque final
+                          -> IO [(BlockNum,Int,HexEthAddr,Maybe HexHash256,HexData)]
 dbSelectContractCodeErc20 myCon blkIni blkFin = do
   (colDefs,isValues) <- query_ myCon (selectContractCodeErc20Q blkIni blkFin)
   readContractsCode isValues
@@ -624,6 +665,9 @@ selectContractCodeAddrsQ addrs =
   let addrsQ = LBS.intercalate "," $ replicate (length addrs) "?"
   in Query $ "select blkNum,txIdx,addr,bzzr0,code from contractsCode where addr in (" <> addrsQ <> ");"
 selectContractCodeAddrsP = map mySetAddr
+dbSelectContractCodeAddrs :: MySQLConn
+                          -> [HexEthAddr]
+                          -> IO [(BlockNum,Int,HexEthAddr,Maybe HexHash256,HexData)]
 dbSelectContractCodeAddrs myCon addrs = do
   if null addrs
     then return []
@@ -677,6 +721,15 @@ insertErc20P blkNum txIdx addr isErc20 mName mSymbol mDecimals =
   , maybe MySQLNull mySetUnicode mSymbol
   , maybe MySQLNull mySetUInt8 mDecimals
   ]
+dbInsertErc20 :: MySQLConn
+              -> BlockNum       -- ^ Bloque
+              -> Int            -- ^ Indice de transacción
+              -> HexEthAddr     -- ^ Dirección del contract
+              -> Bool           -- ^ Cumple EIP20/ERC20
+              -> Maybe Text     -- ^ `name` del token
+              -> Maybe Text     -- ^ `symbol` del token
+              -> Maybe Uint8    -- ^ `decimals` del token
+              -> IO ()
 dbInsertErc20 myCon blkNum txIdx addr isErc20 mName mSymbol mDecimals = do
   print ("erc20", blkNum, txIdx, addr, isErc20, mName, mSymbol, mDecimals)
   execute myCon insertErc20Q (insertErc20P blkNum txIdx addr isErc20 mName mSymbol mDecimals) >>= printErr
@@ -685,6 +738,9 @@ selectErc20AddrsQ addrs =
   let addrsQ = LBS.intercalate "," $ replicate (length addrs) "?"
   in Query $ "select blkNum,txIdx,addr,isErc20,name,symbol,decimals from erc20s where addr in (" <> addrsQ <> ");"
 selectErc20AddrsP addrs = map mySetAddr addrs
+dbSelectErc20Addrs :: MySQLConn
+                   -> [HexEthAddr]
+                   -> IO [(BlockNum,Int,HexEthAddr,Bool,Maybe Text,Maybe Text,Maybe Uint8)]
 dbSelectErc20Addrs myCon addrs = do
   if null addrs
     then return []
@@ -719,6 +775,15 @@ insertErc20LogP blkNum txIdx addr transfer fromA toA amount =
   , mySetAddr toA
   , mySetUInt256 amount
   ]
+dbInsertErc20Log :: MySQLConn
+                 -> BlockNum        -- ^ Bloque
+                 -> Int             -- ^ Indice transacción
+                 -> HexEthAddr      -- ^ Dirección del contract
+                 -> Bool            -- ^ Es `transfer`
+                 -> HexEthAddr      -- ^ From
+                 -> HexEthAddr      -- ^ To
+                 -> Uint256       -- ^ Valor
+                 -> IO ()
 dbInsertErc20Log myCon blkNum txIdx addr transfer fromA toA amount = do
   print ("erc20log", blkNum, txIdx, addr, transfer, fromA, toA, amount)
   execute myCon insertErc20LogQ (insertErc20LogP blkNum txIdx addr transfer fromA toA amount) >>= printErr
