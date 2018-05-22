@@ -203,19 +203,25 @@ insertBlockDb doTest ethUrl myCon doPar blkNum = do
                   ) txAddrs
       mapM_ print rDacc'
     else
-      ignoreCtrlC $ do
-        withTransaction myCon $ do
-          dbInsertMyTx myCon mtx
-          dbInsertTxs myCon rTx
-          dbInsertContractCreations myCon rNew
-          dbInsertMsgCalls myCon rCall
-          dbInsertInternalTxs myCon rItx
-          insertMyTouchedAccountsDb ethUrl myCon blkNum rDacc
-        withTransaction myCon $ do
-          let mtxsNew = joinNews (rNew ++ filter (\(MyInternalTx _ _ _ _ _ op) -> op == OpCREATE) rItx)
-          mapM_ (mapM_ (insertBlockContractCodeDb myCon ethUrl)) mtxsNew
-          (newErc20s,newNoErc20s,hErc20logs) <- getErc20Db myCon ethUrl blkNum blkNum
-          insertErc20Db myCon newErc20s newNoErc20s hErc20logs
+      ignoreCtrlC $ withTransaction myCon $ do
+        -- insertar bloque
+        dbInsertMyTx myCon mtx
+        -- transacciones
+        dbInsertTxs myCon rTx
+        -- contract creations
+        dbInsertContractCreations myCon rNew
+        -- msg calls
+        dbInsertMsgCalls myCon rCall
+        -- internal transactions
+        dbInsertInternalTxs myCon rItx
+        -- dead accounts
+        insertMyTouchedAccountsDb ethUrl myCon blkNum rDacc
+        -- contracts code
+        let mtxsNew = joinNews (rNew ++ filter (\(MyInternalTx _ _ _ _ _ op) -> op == OpCREATE) rItx)
+        mapM_ (mapM_ (insertBlockContractCodeDb myCon ethUrl)) mtxsNew
+        -- new ERC20s y logs ERC20
+        (newErc20s,newNoErc20s,hErc20logs) <- getErc20Db myCon ethUrl blkNum blkNum
+        insertErc20Db myCon newErc20s newNoErc20s hErc20logs
   where
     tl2tup tl = (traceLogDepth tl, traceLogOp tl)
 
