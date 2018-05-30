@@ -37,10 +37,7 @@ module Database.MySQL.Ethereum.DB
   , dbSelectInternalTxCountAddr
   , dbSelectInternalTxFromBlkNum
   -- ** Dead accounts
-  , dbInsertDeadAccount
   , dbInsertDeadAccounts
-  , dbSelectDeadAccountAddr
-  , dbSelectDeadAccountAddrs
   -- ** Mask EVM ops
   , traceLogsMaskOp
   , hasOp
@@ -473,34 +470,14 @@ dbSelectInternalTxFromBlkNum myCon iniBlk lstBlk opcode = do
                    (myGetNum vIdx) (myGetAddr vFromA)
                    (myGetAddr vAddr) (myGetOp vOpcode)
 
-createDeadAccountsQ = "create table deadAccounts (blkNum integer unsigned not null, txIdx smallint unsigned not null, addr binary(20) not null, primary key (addr), foreign key (blkNum,txIdx) references txs (blkNum,txIdx));"
-insertDeadAccountQ = "insert into deadAccounts (blkNum,txIdx,addr) value (?,?,?);"
+createDeadAccountsQ = "create table deadAccounts (blkNum integer unsigned not null, txIdx smallint unsigned not null, addr binary(20) not null, primary key (blkNum,txIdx,addr), foreign key (blkNum,txIdx) references txs (blkNum,txIdx));"
+createIndexDeadAccountAddrQ = "create index deadAccountAddr on deadAccounts (addr);"
 insertDeadAccountP blkNum txIdx addr = 
   [ mySetBlkNum blkNum
   , mySetTxIdx txIdx
   , mySetAddr addr
   ]
-dbInsertDeadAccount myCon blkNum txIdx addr = do
-  print ("dead",blkNum,txIdx,addr)
-  execute myCon insertDeadAccountQ (insertDeadAccountP blkNum txIdx addr) >>= printErr
 dbInsertDeadAccounts myCon = tableInsertMyTxs myCon "deadAccounts" ["blkNum","txIdx","addr"]
-selectDeadAccountAddrQ = "select * from deadAccounts where addr = ?"
-selectDeadAccountAddrP addr = [mySetAddr addr]
-dbSelectDeadAccountAddr myCon addr = do
-  (colDefs,isValues) <- query myCon selectDeadAccountAddrQ
-                                      (selectDeadAccountAddrP addr)
-  readMaybeVal isValues id
-selectDeadAccountAddrsQ addrs =
-  let addrsL = LBS.intercalate "," $ replicate (length addrs) "?"
-  in Query $ "select addr from deadAccounts where addr in (" <> addrsL <> ");"
-selectDeadAccountAddrsP = map mySetAddr
-dbSelectDeadAccountAddrs myCon addrs = do
-  if null addrs
-    then return []
-    else do
-      (colDefs,isValues) <- query myCon (selectDeadAccountAddrsQ addrs)
-                                       (selectDeadAccountAddrsP addrs)
-      map (myGetAddr . head) <$> myReadAndSkipToEof isValues
 
 dbInsertMyTx myCon mtx = case mtx of
   (MyBlock blkNum blkHash miner difficulty gasLimit) ->
@@ -606,6 +583,7 @@ dbCreateTables myCon = do
   execute_ myCon createIndexInternalTxFromQ >>= printErr
   execute_ myCon createIndexInternalTxAddrQ >>= printErr
   execute_ myCon createDeadAccountsQ >>= printErr
+  execute_ myCon createIndexDeadAccountAddrQ >>= printErr
   execute_ myCon createContractCodeQ >>= printErr
   execute_ myCon createIndexBzzr0Q >>= printErr
   execute_ myCon createErc20sQ >>= printErr

@@ -207,19 +207,26 @@ insertBlockDb doTest ethUrl myCon doPar blkNum = do
         -- insertar bloque
         dbInsertMyTx myCon mtx
         -- transacciones
+        print "TXS"
         dbInsertTxs myCon rTx
         -- contract creations
+        print "NEWS"
         dbInsertContractCreations myCon rNew
         -- msg calls
+        print "CALLS"
         dbInsertMsgCalls myCon rCall
         -- internal transactions
+        print "INTERNAL TXS"
         dbInsertInternalTxs myCon rItx
         -- dead accounts
+        print "DEAD ACCOUNTS"
         insertMyTouchedAccountsDb ethUrl myCon blkNum rDacc
         -- contracts code
+        print "CONTRACTS CODE"
         let mtxsNew = joinNews (rNew ++ filter (\(MyInternalTx _ _ _ _ _ op) -> op == OpCREATE) rItx)
         mapM_ (mapM_ (insertBlockContractCodeDb myCon ethUrl)) mtxsNew
         -- new ERC20s y logs ERC20
+        print "ERC20s"
         (newErc20s,newNoErc20s,hErc20logs) <- getErc20Db myCon ethUrl blkNum blkNum
         insertErc20Db myCon newErc20s newNoErc20s hErc20logs
   where
@@ -420,23 +427,10 @@ insertMyTouchedAccountsDb ethUrl myCon blkNum rDacc = do
     rDacc2 <- concat <$> mapM (\(txIdx,addrs) ->
                 if null addrs
                   then return []
-                  else do
-                    addrs1 <- deadAccounts ethUrl myCon blkNum txIdx addrs
-                    addrs2 <- dbSelectDeadAccountAddrs myCon addrs1
-                    let addrs3 = filter (\addr -> addr `notElem` addrs2) addrs1
-                    return $ map (MyTouchedAccount blkNum txIdx) addrs3
+                  else map (MyTouchedAccount blkNum txIdx)
+                   <$> deadAccounts ethUrl myCon blkNum txIdx addrs
                 ) txIdxAddrs
     unless (null rDacc2) $ dbInsertDeadAccounts myCon rDacc2
-
-insertMyTouchedAccountDb ethUrl myCon mtx = case mtx of
-  (MyTouchedAccount blkNum txIdx addr) -> do
-    let proto = ethProto publicEthProtoCfg blkNum
-    when (proto `elem` enumFrom SpuriousDragon) $ do
-      yetIs <- isJust <$> dbSelectDeadAccountAddr myCon addr
-      unless yetIs $ do
-        isDead <- isDeadAccount ethUrl myCon blkNum txIdx addr
-        when isDead $ dbInsertDeadAccount myCon blkNum txIdx addr
-  _ -> error $ "dbInsertMyTouchedAccount: " ++ show mtx
 
 isReservedAddr addr = addr `elem` [addr0,addr1,addr2,addr3,addr4]
 
